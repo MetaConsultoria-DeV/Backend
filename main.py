@@ -104,7 +104,13 @@ async def get_coordenacoes():
 
 @app.get('/api/membros', response_model=list[Membro])
 async def get_membros():
-    query = 'SELECT id, nome, email FROM membro ORDER BY nome'
+    query = '''
+    SELECT id, nome, email
+    FROM membro
+    WHERE LOWER(cargo) LIKE '%gerente%'
+      AND LOWER(cargo) LIKE '%projeto%'
+    ORDER BY nome
+    '''
     try:
         resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
         return resultado or []
