@@ -30,7 +30,10 @@ class MembrosEndpointTest(unittest.IsolatedAsyncioTestCase):
             response = await self.main.get_membros()
 
         query = execute_query.call_args.args[0]
-        self.assertIn('LOWER(cargo)', query)
+        self.assertIn('FROM membro m', query)
+        self.assertIn('JOIN membro_cargo mc ON mc.membro_id = m.id', query)
+        self.assertIn('JOIN cargo c ON c.id = mc.cargo_id', query)
+        self.assertIn('LOWER(c.nome)', query)
         self.assertIn('%gerente%', query)
         self.assertIn('%projeto%', query)
         self.assertEqual(response, expected_rows)
