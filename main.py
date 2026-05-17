@@ -50,7 +50,8 @@ async def get_projetos(gerente_id: int | None = None):
         params = (gerente_id,)
 
     query = '''
-    SELECT pe.id, pe.nome, c.numero as numero_contrato, c.valor_total
+    SELECT pe.id, pe.nome, c.numero as numero_contrato, c.valor_total,
+           pe.possui_orientador, pe.nome_orientador
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
     WHERE (
@@ -97,13 +98,34 @@ async def validate_project_manager(respondente_nome: str, projeto_externo_id: in
     return bool(resultado)
 
 
+async def update_project_orientador_if_unknown(
+    projeto_externo_id: int,
+    possui_orientador: str,
+    nome_orientador: str | None,
+) -> None:
+    query = '''
+    UPDATE projeto_externo
+    SET possui_orientador = %s,
+        nome_orientador = %s
+    WHERE id = %s
+      AND possui_orientador IS NULL
+    '''
+    possui_orientador_value = 1 if possui_orientador == 'Sim' else 0
+    nome_orientador_value = nome_orientador if possui_orientador_value else None
+    await asyncio.to_thread(
+        execute_query,
+        query,
+        (possui_orientador_value, nome_orientador_value, projeto_externo_id),
+    )
+
+
 @app.get('/api/projetos/{projeto_id}')
 async def get_projeto_detalhes(projeto_id: int):
     query = '''
     SELECT pe.id, pe.nome, pe.data_inicio, c.numero as numero_contrato,
-           c.valor_total, c.data_inicio
+           c.valor_total, pe.possui_orientador, pe.nome_orientador
     FROM projeto_externo pe
-    JOIN contrato c ON c.projeto_externo_id = pe.id
+    LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
     WHERE pe.id = %s
     '''
     try:
@@ -228,6 +250,12 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
 
         if not acomp_id:
             raise Exception('Nenhuma linha inserida em acompanhamento_projeto')
+
+        await update_project_orientador_if_unknown(
+            data.projeto_externo_id,
+            data.possui_orientador,
+            data.nome_orientador,
+        )
 
         if data.possui_orientador == 'Sim':
             orient_query = '''

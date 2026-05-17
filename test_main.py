@@ -52,6 +52,8 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
                 'nome': 'Monitora Petrogarra',
                 'numero_contrato': None,
                 'valor_total': None,
+                'possui_orientador': None,
+                'nome_orientador': None,
             },
         ]
 
@@ -77,6 +79,8 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
                 'nome': 'BN Cinderela 2.0',
                 'numero_contrato': None,
                 'valor_total': None,
+                'possui_orientador': 1,
+                'nome_orientador': 'Dra. Camila',
             },
         ]
 
@@ -107,6 +111,8 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
                 'nome': 'Monitora Petrogarra',
                 'numero_contrato': None,
                 'valor_total': None,
+                'possui_orientador': None,
+                'nome_orientador': None,
             },
         ]
 
@@ -121,6 +127,33 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), expected_rows)
+
+    async def test_get_projeto_detalhes_returns_orientador_state_without_contract(self):
+        projeto_row = {
+            'id': 1,
+            'nome': 'Monitora Petrogarra',
+            'data_inicio': None,
+            'numero_contrato': None,
+            'valor_total': None,
+            'possui_orientador': 0,
+            'nome_orientador': None,
+        }
+
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=[projeto_row, [], []]) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = await self.main.get_projeto_detalhes(1)
+
+        query = execute_query.call_args_list[0].args[0]
+        self.assertIn('pe.possui_orientador', query)
+        self.assertIn('pe.nome_orientador', query)
+        self.assertIn('LEFT JOIN contrato c ON c.projeto_externo_id = pe.id', query)
+        self.assertEqual(response['possui_orientador'], 0)
+        self.assertEqual(response['nome_orientador'], None)
 
 
 class SubmitPapeValidationTest(unittest.IsolatedAsyncioTestCase):
@@ -158,6 +191,22 @@ class SubmitPapeValidationTest(unittest.IsolatedAsyncioTestCase):
             is_valid = await self.main.validate_project_manager('Ana Silva', 99)
 
         self.assertFalse(is_valid)
+
+    async def test_update_project_orientador_if_unknown_saves_first_answer(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=1) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            await self.main.update_project_orientador_if_unknown(3, 'Sim', 'Dra. Camila')
+
+        query, params = execute_query.call_args.args[:2]
+        self.assertIn('UPDATE projeto_externo', query)
+        self.assertIn('WHERE id = %s', query)
+        self.assertIn('possui_orientador IS NULL', query)
+        self.assertEqual(params, (1, 'Dra. Camila', 3))
 
 
 if __name__ == '__main__':

@@ -8,6 +8,8 @@ class Projeto(BaseModel):
     nome: str
     numero_contrato: Optional[str] = None
     valor_total: Optional[float] = None
+    possui_orientador: Optional[bool] = None
+    nome_orientador: Optional[str] = None
 
 
 class Coordenacao(BaseModel):
