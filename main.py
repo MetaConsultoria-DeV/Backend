@@ -35,9 +35,12 @@ async def get_projetos():
     query = '''
     SELECT pe.id, pe.nome, c.numero as numero_contrato, c.valor_total
     FROM projeto_externo pe
-    JOIN contrato c ON c.projeto_externo_id = pe.id
-    WHERE c.finalizado_em IS NULL
-      AND c.fase_atual NOT IN ('Concluido', 'Cancelado')
+    LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
+    WHERE c.id IS NULL
+       OR (
+        c.finalizado_em IS NULL
+        AND (c.fase_atual IS NULL OR c.fase_atual NOT IN ('Concluido', 'Cancelado'))
+       )
     ORDER BY pe.nome
     '''
     try:

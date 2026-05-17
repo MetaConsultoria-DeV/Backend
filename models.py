@@ -6,8 +6,8 @@ from datetime import date
 class Projeto(BaseModel):
     id: int
     nome: str
-    numero_contrato: str
-    valor_total: float
+    numero_contrato: Optional[str] = None
+    valor_total: Optional[float] = None
 
 
 class Coordenacao(BaseModel):
