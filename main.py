@@ -31,25 +31,70 @@ async def health():
 
 
 @app.get('/api/projetos', response_model=list[Projeto])
-async def get_projetos():
+async def get_projetos(gerente_id: int | None = None):
+    manager_filter = ''
+    params = None
+    if gerente_id is not None:
+        manager_filter = '''
+      AND EXISTS (
+        SELECT 1
+        FROM membro_projeto mp
+        JOIN cargo cg ON cg.id = mp.cargo_id
+        WHERE mp.projeto_externo_id = pe.id
+          AND mp.membro_id = %s
+          AND mp.data_saida IS NULL
+          AND LOWER(cg.nome) LIKE '%gerente%'
+          AND LOWER(cg.nome) LIKE '%projeto%'
+      )
+        '''
+        params = (gerente_id,)
+
     query = '''
     SELECT pe.id, pe.nome, c.numero as numero_contrato, c.valor_total
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
-    WHERE c.id IS NULL
-       OR (
+    WHERE (
+        c.id IS NULL
+        OR (
         c.finalizado_em IS NULL
         AND (c.fase_atual IS NULL OR c.fase_atual NOT IN ('Concluido', 'Cancelado'))
+        )
        )
+    {manager_filter}
     ORDER BY pe.nome
-    '''
+    '''.format(manager_filter=manager_filter)
     try:
-        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+        if params:
+            resultado = await asyncio.to_thread(execute_query, query, params, fetch_all=True)
+        else:
+            resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
         return resultado or []
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def validate_project_manager(respondente_nome: str, projeto_externo_id: int) -> bool:
+    query = '''
+    SELECT mp.id
+    FROM membro_projeto mp
+    JOIN membro m ON m.id = mp.membro_id
+    JOIN cargo c ON c.id = mp.cargo_id
+    WHERE mp.projeto_externo_id = %s
+      AND m.nome = %s
+      AND mp.data_saida IS NULL
+      AND LOWER(c.nome) LIKE '%gerente%'
+      AND LOWER(c.nome) LIKE '%projeto%'
+    LIMIT 1
+    '''
+    resultado = await asyncio.to_thread(
+        execute_query,
+        query,
+        (projeto_externo_id, respondente_nome),
+        fetch_one=True,
+    )
+    return bool(resultado)
 
 
 @app.get('/api/projetos/{projeto_id}')
@@ -136,6 +181,16 @@ async def send_to_n8n(data: dict):
 @app.post('/api/pape')
 async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
     try:
+        is_project_manager = await validate_project_manager(
+            data.respondente_nome,
+            data.projeto_externo_id,
+        )
+        if not is_project_manager:
+            raise HTTPException(
+                status_code=400,
+                detail='Este projeto nÃ£o estÃ¡ vinculado Ã  gerente selecionada',
+            )
+
         acomp_query = '''
         INSERT INTO acompanhamento_projeto (
             projeto_externo_id, contrato_id, data_resposta, modelo_gerenciamento,

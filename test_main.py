@@ -70,6 +70,36 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('c.fase_atual IS NULL', query)
         self.assertEqual(response, expected_rows)
 
+    async def test_get_projetos_can_filter_by_manager_id(self):
+        expected_rows = [
+            {
+                'id': 2,
+                'nome': 'BN Cinderela 2.0',
+                'numero_contrato': None,
+                'valor_total': None,
+            },
+        ]
+
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=expected_rows) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = await self.main.get_projetos(gerente_id=7)
+
+        query, params = execute_query.call_args.args[:2]
+        self.assertIn('EXISTS', query)
+        self.assertIn('FROM membro_projeto mp', query)
+        self.assertIn('JOIN cargo cg ON cg.id = mp.cargo_id', query)
+        self.assertIn('mp.membro_id = %s', query)
+        self.assertIn('mp.data_saida IS NULL', query)
+        self.assertIn('%gerente%', query)
+        self.assertIn('%projeto%', query)
+        self.assertEqual(params, (7,))
+        self.assertEqual(response, expected_rows)
+
     def test_projetos_response_accepts_missing_contract_fields(self):
         expected_rows = [
             {
@@ -91,6 +121,43 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), expected_rows)
+
+
+class SubmitPapeValidationTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    async def test_validate_project_manager_checks_selected_project_and_respondent(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', return_value={'id': 1}) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            is_valid = await self.main.validate_project_manager('Ana Silva', 3)
+
+        query, params = execute_query.call_args.args[:2]
+        self.assertIn('FROM membro_projeto mp', query)
+        self.assertIn('JOIN membro m ON m.id = mp.membro_id', query)
+        self.assertIn('JOIN cargo c ON c.id = mp.cargo_id', query)
+        self.assertIn('mp.projeto_externo_id = %s', query)
+        self.assertIn('m.nome = %s', query)
+        self.assertIn('mp.data_saida IS NULL', query)
+        self.assertEqual(params, (3, 'Ana Silva'))
+        self.assertTrue(is_valid)
+
+    async def test_validate_project_manager_rejects_non_manager(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=None),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            is_valid = await self.main.validate_project_manager('Ana Silva', 99)
+
+        self.assertFalse(is_valid)
 
 
 if __name__ == '__main__':
