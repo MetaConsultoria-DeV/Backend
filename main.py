@@ -331,6 +331,35 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get('/api/dashboard/pape')
+async def get_dashboard_pape():
+    try:
+        total_query = 'SELECT COUNT(*) as total FROM acompanhamento_projeto'
+        total_result = await asyncio.to_thread(execute_query, total_query, fetch_one=True)
+        total = total_result['total'] if total_result else 0
+
+        sat_query = 'SELECT AVG(satisfacao_cliente) as media FROM acompanhamento_projeto WHERE satisfacao_cliente IS NOT NULL'
+        sat_result = await asyncio.to_thread(execute_query, sat_query, fetch_one=True)
+        media_satisfacao = round(sat_result['media'], 1) if sat_result and sat_result['media'] else 0
+
+        met_query = 'SELECT modelo_gerenciamento, COUNT(*) as quantidade FROM acompanhamento_projeto GROUP BY modelo_gerenciamento'
+        met_result = await asyncio.to_thread(execute_query, met_query, fetch_all=True)
+        metodologias = {row['modelo_gerenciamento']: row['quantidade'] for row in met_result} if met_result else {}
+
+        cron_query = 'SELECT status_cronograma, COUNT(*) as quantidade FROM acompanhamento_projeto GROUP BY status_cronograma'
+        cron_result = await asyncio.to_thread(execute_query, cron_query, fetch_all=True)
+        cronograma = {row['status_cronograma']: row['quantidade'] for row in cron_result} if cron_result else {}
+
+        return {
+            'total_projetos': total,
+            'media_satisfacao': media_satisfacao,
+            'metodologias': metodologias,
+            'status_cronograma': cronograma
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == '__main__':
     import uvicorn
 
