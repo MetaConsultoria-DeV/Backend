@@ -218,9 +218,12 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
             projeto_externo_id, contrato_id, data_resposta, modelo_gerenciamento,
             pct_conclusao, status_cronograma, motivos_atraso,
             capacitacao_equipe, eficacia_metodologia, nivel_retrabalho,
-            comunicacao_cliente, orcamento_nao_necessario
+            comunicacao_cliente, orcamento_nao_necessario,
+            primeira_resposta, cliente_percebeu_valor, pct_marcos_prazo,
+            variacao_escopo, impacto_cliente, abertura_cliente,
+            satisfacao_cliente, suficiencia_orcamento_nota, dados_iniciais_adicionais
         )
-        SELECT %s, c.id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        SELECT %s, c.id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         FROM contrato c
         WHERE c.projeto_externo_id = %s
         LIMIT 1
@@ -228,6 +231,16 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
 
         motivos_str = json.dumps(data.motivos_atraso) if data.motivos_atraso else None
         orcamento_nao_necessario = 1 if data.suficiencia_orcamento == 'Não necessitou' else 0
+        suficiencia_nota = int(data.suficiencia_orcamento) if data.suficiencia_orcamento and data.suficiencia_orcamento != 'Não necessitou' else None
+        
+        dados_iniciais = {
+            "data_inicio": data.data_inicio,
+            "numero_contrato": data.numero_contrato,
+            "valor_projeto": data.valor_projeto,
+            "servicos_projeto": data.servicos_projeto,
+            "coordenacoes": data.coordenacoes
+        }
+        dados_iniciais_str = json.dumps(dados_iniciais) if any(dados_iniciais.values()) else None
 
         acomp_id = await asyncio.to_thread(
             execute_insert,
@@ -244,6 +257,15 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
                 data.nivel_retrabalho,
                 data.comunicacao_cliente,
                 orcamento_nao_necessario,
+                1 if data.primeira_resposta == 'Sim' else 0,
+                data.cliente_percebeu_valor,
+                data.pct_marcos_prazo,
+                data.variacao_escopo,
+                data.impacto_cliente,
+                data.abertura_cliente,
+                data.satisfacao_cliente,
+                suficiencia_nota,
+                dados_iniciais_str,
                 data.projeto_externo_id,
             ),
         )
@@ -259,11 +281,19 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
 
         if data.possui_orientador == 'Sim':
             orient_query = '''
-            INSERT INTO acomp_orientador (acompanhamento_id, possui_orientador, nome_orientador)
-            VALUES (%s, 1, %s)
+            INSERT INTO acomp_orientador (
+                acompanhamento_id, possui_orientador, nome_orientador,
+                efetividade_orientador, disponibilidade_orientador
+            )
+            VALUES (%s, 1, %s, %s, %s)
             '''
             await asyncio.to_thread(
-                execute_query, orient_query, (acomp_id, data.nome_orientador or 'Sem nome')
+                execute_query, orient_query, (
+                    acomp_id, 
+                    data.nome_orientador or 'Sem nome',
+                    data.efetividade_orientador,
+                    data.disponibilidade_orientador
+                )
             )
 
         if data.modelo_gerenciamento == 'Ágil' and data.pct_story_points:
