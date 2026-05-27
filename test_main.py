@@ -232,6 +232,37 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_build_riscos_dashboard_groups_motivos_and_scores(self):
+        rows = [
+            {
+                'projeto': 'AM do Amor',
+                'status_cronograma': 'Atrasado',
+                'motivos_atraso': '["Comunicação com cliente", "Capacidade técnica"]',
+                'coordenacao': 'Gestão de Negócios',
+                'suficiencia_orcamento': 2,
+                'comunicacao_cliente': 3,
+                'capacitacao_equipe': 4,
+            },
+            {
+                'projeto': 'Valida Bruninho',
+                'status_cronograma': 'Com risco de atraso',
+                'motivos_atraso': '["Comunicação com cliente"]',
+                'coordenacao': 'Tecnologia e Desenvolvimento, Gestão de Negócios',
+                'suficiencia_orcamento': 4,
+                'comunicacao_cliente': 2,
+                'capacitacao_equipe': 5,
+            },
+        ]
+
+        result = self.main.build_riscos_dashboard(rows)
+
+        self.assertEqual(result['motivos_por_coordenacao'][0]['motivo'], 'Comunicação com cliente')
+        self.assertEqual(result['motivos_por_coordenacao'][0]['total'], 3)
+        self.assertEqual(result['motivos_por_coordenacao'][0]['coordenacoes']['Gestão de Negócios'], 2)
+        self.assertEqual(len(result['projetos_em_risco']), 2)
+        self.assertEqual(result['suficiencia_orcamento'][0], {'name': 'AM do Amor', 'value': 2})
+        self.assertEqual(result['comunicacao_cliente'][0], {'name': 'Valida Bruninho', 'value': 2})
+
     async def test_get_dashboard_pape_uses_latest_project_answers(self):
         expected_results = [
             {'total': 12},
@@ -242,6 +273,17 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
             [{'pct_conclusao': '61-80%', 'quantidade': 2}],
             [{'motivos_atraso': '["Comunicação com cliente"]'}],
             [{'id': 1, 'projeto': 'AM do Amor'}],
+            [
+                {
+                    'projeto': 'AM do Amor',
+                    'status_cronograma': 'Atrasado',
+                    'motivos_atraso': '["Comunicação com cliente"]',
+                    'coordenacao': 'Gestão de Negócios',
+                    'suficiencia_orcamento': 2,
+                    'comunicacao_cliente': 3,
+                    'capacitacao_equipe': 4,
+                }
+            ],
         ]
 
         async def run_sync(func, *args, **kwargs):
@@ -262,6 +304,7 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response['media_satisfacao'], 4.2)
         self.assertEqual(response['motivos_atraso'], [{'name': 'Comunicação com cliente', 'value': 1}])
         self.assertEqual(response['projetos_atuais'], [{'id': 1, 'projeto': 'AM do Amor'}])
+        self.assertEqual(response['riscos']['suficiencia_orcamento'], [{'name': 'AM do Amor', 'value': 2}])
 
 
 if __name__ == '__main__':

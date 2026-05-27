@@ -119,32 +119,103 @@ async def update_project_orientador_if_unknown(
     )
 
 
+def parse_motivos_atraso(raw_motivos) -> list[str]:
+    if not raw_motivos:
+        return []
+
+    try:
+        parsed_motivos = json.loads(raw_motivos)
+    except (TypeError, json.JSONDecodeError):
+        parsed_motivos = [raw_motivos]
+
+    if isinstance(parsed_motivos, str):
+        parsed_motivos = [parsed_motivos]
+
+    return [str(motivo) for motivo in parsed_motivos if motivo]
+
+
 def count_motivos_atraso(rows: list[dict]) -> list[dict]:
     counts: dict[str, int] = {}
 
     for row in rows:
-        raw_motivos = row.get('motivos_atraso')
-        if not raw_motivos:
-            continue
-
-        try:
-            parsed_motivos = json.loads(raw_motivos)
-        except (TypeError, json.JSONDecodeError):
-            parsed_motivos = [raw_motivos]
-
-        if isinstance(parsed_motivos, str):
-            parsed_motivos = [parsed_motivos]
-
-        for motivo in parsed_motivos:
-            if not motivo:
-                continue
-            motivo_label = str(motivo)
+        for motivo_label in parse_motivos_atraso(row.get('motivos_atraso')):
             counts[motivo_label] = counts.get(motivo_label, 0) + 1
 
     return [
         {'name': name, 'value': value}
         for name, value in sorted(counts.items(), key=lambda item: item[1], reverse=True)
     ]
+
+
+def build_riscos_dashboard(rows: list[dict]) -> dict:
+    motivos_por_coordenacao: dict[str, dict[str, int]] = {}
+    projetos_em_risco: list[dict] = []
+    suficiencia_orcamento: list[dict] = []
+    comunicacao_cliente: list[dict] = []
+    capacitacao_equipe: list[dict] = []
+
+    for row in rows:
+        projeto = row.get('projeto') or 'Projeto sem nome'
+        status = row.get('status_cronograma') or 'Sem status'
+        coordenacoes_raw = row.get('coordenacao') or 'Sem coordenação'
+        coordenacoes = [coord.strip() for coord in str(coordenacoes_raw).split(',') if coord.strip()]
+        motivos = parse_motivos_atraso(row.get('motivos_atraso'))
+        is_risk_status = status in ('Com risco de atraso', 'Atrasado')
+
+        if is_risk_status:
+            projetos_em_risco.append({
+                'projeto': projeto,
+                'status': status,
+                'motivos': motivos,
+                'coordenacao': coordenacoes_raw,
+            })
+
+            for motivo in motivos:
+                if motivo not in motivos_por_coordenacao:
+                    motivos_por_coordenacao[motivo] = {}
+                for coordenacao in coordenacoes or ['Sem coordenação']:
+                    motivos_por_coordenacao[motivo][coordenacao] = (
+                        motivos_por_coordenacao[motivo].get(coordenacao, 0) + 1
+                    )
+
+        if row.get('suficiencia_orcamento') is not None:
+            suficiencia_orcamento.append({
+                'name': projeto,
+                'value': int(row['suficiencia_orcamento']),
+            })
+
+        if row.get('comunicacao_cliente') is not None:
+            comunicacao_cliente.append({
+                'name': projeto,
+                'value': int(row['comunicacao_cliente']),
+            })
+
+        if row.get('capacitacao_equipe') is not None:
+            capacitacao_equipe.append({
+                'name': projeto,
+                'value': int(row['capacitacao_equipe']),
+            })
+
+    matriz_motivos = []
+    for motivo, coordenacoes in motivos_por_coordenacao.items():
+        total = sum(coordenacoes.values())
+        matriz_motivos.append({
+            'motivo': motivo,
+            'total': total,
+            'coordenacoes': dict(sorted(coordenacoes.items())),
+        })
+
+    return {
+        'motivos_por_coordenacao': sorted(
+            matriz_motivos,
+            key=lambda item: item['total'],
+            reverse=True,
+        ),
+        'projetos_em_risco': projetos_em_risco,
+        'suficiencia_orcamento': sorted(suficiencia_orcamento, key=lambda item: item['value']),
+        'comunicacao_cliente': sorted(comunicacao_cliente, key=lambda item: item['value']),
+        'capacitacao_equipe': sorted(capacitacao_equipe, key=lambda item: item['value']),
+    }
 
 
 @app.get('/api/projetos/{projeto_id}')
@@ -247,7 +318,7 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
             pct_conclusao, status_cronograma, motivos_atraso,
             capacitacao_equipe, eficacia_metodologia, nivel_retrabalho,
             comunicacao_cliente, orcamento_nao_necessario,
-            primeira_resposta, cliente_percebeu_valor, pct_marcos_prazo,
+            primera_resposta, cliente_percebeu_valor, pct_marcos_prazo,
             variacao_escopo, impacto_cliente, abertura_cliente,
             satisfacao_cliente, suficiencia_orcamento_nota, dados_iniciais_adicionados
         )
@@ -448,6 +519,28 @@ async def get_dashboard_pape():
             pe.nome
         LIMIT 12
         '''
+        riscos_query = f'''
+        SELECT
+            pe.nome as projeto,
+            ap.status_cronograma,
+            ap.motivos_atraso,
+            ap.comunicacao_cliente,
+            ap.capacitacao_equipe,
+            COALESCE(ap.suficiencia_orcamento_nota, ap.suficiencia_orcamento) as suficiencia_orcamento,
+            COALESCE((
+                SELECT GROUP_CONCAT(DISTINCT co.nome ORDER BY co.nome SEPARATOR ', ')
+                FROM membro_projeto mp
+                JOIN coordenacao co ON co.id = mp.coordenacao_id
+                WHERE mp.projeto_externo_id = pe.id
+                  AND mp.data_saida IS NULL
+            ), 'Sem coordenação') as coordenacao
+        FROM acompanhamento_projeto ap
+        JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
+        WHERE {latest_filter}
+        ORDER BY
+            FIELD(ap.status_cronograma, 'Atrasado', 'Com risco de atraso', 'Dentro do prazo', 'Concluido'),
+            pe.nome
+        '''
 
         total_respostas_result = await asyncio.to_thread(
             execute_query, total_respostas_query, fetch_one=True
@@ -463,6 +556,7 @@ async def get_dashboard_pape():
         )
         motivos_rows = await asyncio.to_thread(execute_query, motivos_query, fetch_all=True)
         projetos_atuais = await asyncio.to_thread(execute_query, projetos_query, fetch_all=True)
+        riscos_rows = await asyncio.to_thread(execute_query, riscos_query, fetch_all=True)
 
         total_respostas = total_respostas_result['total'] if total_respostas_result else 0
         total_projetos = total_projetos_result['total'] if total_projetos_result else 0
@@ -480,6 +574,7 @@ async def get_dashboard_pape():
             'pct_conclusao': conclusao,
             'motivos_atraso': count_motivos_atraso(motivos_rows or []),
             'projetos_atuais': projetos_atuais or [],
+            'riscos': build_riscos_dashboard(riscos_rows or []),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
