@@ -218,6 +218,76 @@ def build_riscos_dashboard(rows: list[dict]) -> dict:
     }
 
 
+def parse_score(value) -> int | None:
+    if value is None or value == '':
+        return None
+
+    try:
+        score = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    if score < 1 or score > 5:
+        return None
+
+    return score
+
+
+def build_metodo_escopo_dashboard(rows: list[dict]) -> dict:
+    fields = [
+        ('nivel_retrabalho', 'retrabalho', 'Retrabalho'),
+        ('variacao_escopo', 'variacao_escopo', 'Escopo definido'),
+        ('capacitacao_equipe', 'capacitacao_equipe', 'Capacitação da equipe'),
+        ('eficacia_metodologia', 'eficacia_metodologia', 'Eficácia da metodologia'),
+    ]
+    series: dict[str, list[dict]] = {result_key: [] for _, result_key, _ in fields}
+    pontos_atencao: list[dict] = []
+
+    for row in rows:
+        projeto = row.get('projeto') or 'Projeto sem nome'
+        modelo = row.get('modelo_gerenciamento') or 'Sem modelo'
+
+        for field, result_key, label in fields:
+            score = parse_score(row.get(field))
+            if score is None:
+                continue
+
+            series[result_key].append({
+                'name': projeto,
+                'value': score,
+            })
+
+            if score <= 2:
+                pontos_atencao.append({
+                    'projeto': projeto,
+                    'indicador': label,
+                    'nota': score,
+                    'modelo': modelo,
+                })
+
+    medias = {}
+    for result_key, values in series.items():
+        if not values:
+            medias[result_key] = 0
+            continue
+        medias[result_key] = round(
+            sum(item['value'] for item in values) / len(values),
+            1,
+        )
+
+    return {
+        'retrabalho': sorted(series['retrabalho'], key=lambda item: (item['value'], item['name'])),
+        'variacao_escopo': sorted(series['variacao_escopo'], key=lambda item: (item['value'], item['name'])),
+        'capacitacao_equipe': sorted(series['capacitacao_equipe'], key=lambda item: (item['value'], item['name'])),
+        'eficacia_metodologia': sorted(series['eficacia_metodologia'], key=lambda item: (item['value'], item['name'])),
+        'pontos_atencao': sorted(
+            pontos_atencao,
+            key=lambda item: item['nota'],
+        ),
+        'medias': medias,
+    }
+
+
 @app.get('/api/projetos/{projeto_id}')
 async def get_projeto_detalhes(projeto_id: int):
     query = '''
@@ -541,6 +611,19 @@ async def get_dashboard_pape():
             FIELD(ap.status_cronograma, 'Atrasado', 'Com risco de atraso', 'Dentro do prazo', 'Concluido'),
             pe.nome
         '''
+        metodo_escopo_query = f'''
+        SELECT
+            pe.nome as projeto,
+            ap.modelo_gerenciamento,
+            ap.nivel_retrabalho,
+            ap.variacao_escopo,
+            ap.capacitacao_equipe,
+            ap.eficacia_metodologia
+        FROM acompanhamento_projeto ap
+        JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
+        WHERE {latest_filter}
+        ORDER BY pe.nome
+        '''
 
         total_respostas_result = await asyncio.to_thread(
             execute_query, total_respostas_query, fetch_one=True
@@ -557,6 +640,9 @@ async def get_dashboard_pape():
         motivos_rows = await asyncio.to_thread(execute_query, motivos_query, fetch_all=True)
         projetos_atuais = await asyncio.to_thread(execute_query, projetos_query, fetch_all=True)
         riscos_rows = await asyncio.to_thread(execute_query, riscos_query, fetch_all=True)
+        metodo_escopo_rows = await asyncio.to_thread(
+            execute_query, metodo_escopo_query, fetch_all=True
+        )
 
         total_respostas = total_respostas_result['total'] if total_respostas_result else 0
         total_projetos = total_projetos_result['total'] if total_projetos_result else 0
@@ -575,6 +661,7 @@ async def get_dashboard_pape():
             'motivos_atraso': count_motivos_atraso(motivos_rows or []),
             'projetos_atuais': projetos_atuais or [],
             'riscos': build_riscos_dashboard(riscos_rows or []),
+            'metodo_escopo': build_metodo_escopo_dashboard(metodo_escopo_rows or []),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

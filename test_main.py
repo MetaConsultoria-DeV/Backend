@@ -263,6 +263,43 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['suficiencia_orcamento'][0], {'name': 'AM do Amor', 'value': 2})
         self.assertEqual(result['comunicacao_cliente'][0], {'name': 'Valida Bruninho', 'value': 2})
 
+    def test_build_metodo_escopo_dashboard_orders_scores_and_attention_points(self):
+        rows = [
+            {
+                'projeto': 'AM do Amor',
+                'modelo_gerenciamento': 'Agil',
+                'nivel_retrabalho': 5,
+                'variacao_escopo': None,
+                'capacitacao_equipe': 4,
+                'eficacia_metodologia': 2,
+            },
+            {
+                'projeto': 'Miller P(AI)',
+                'modelo_gerenciamento': 'Hibrido',
+                'nivel_retrabalho': 2,
+                'variacao_escopo': 4,
+                'capacitacao_equipe': 3,
+                'eficacia_metodologia': 1,
+            },
+            {
+                'projeto': 'FEMEA no Mar',
+                'modelo_gerenciamento': 'Tradicional',
+                'nivel_retrabalho': 4,
+                'variacao_escopo': 1,
+                'capacitacao_equipe': 2,
+                'eficacia_metodologia': 5,
+            },
+        ]
+
+        result = self.main.build_metodo_escopo_dashboard(rows)
+
+        self.assertEqual(result['retrabalho'][0], {'name': 'Miller P(AI)', 'value': 2})
+        self.assertEqual(result['variacao_escopo'][0], {'name': 'FEMEA no Mar', 'value': 1})
+        self.assertEqual(result['eficacia_metodologia'][0], {'name': 'Miller P(AI)', 'value': 1})
+        self.assertEqual(result['medias']['variacao_escopo'], 2.5)
+        self.assertEqual(result['pontos_atencao'][0]['projeto'], 'Miller P(AI)')
+        self.assertEqual(result['pontos_atencao'][0]['indicador'], 'Eficácia da metodologia')
+
     async def test_get_dashboard_pape_uses_latest_project_answers(self):
         expected_results = [
             {'total': 12},
@@ -282,6 +319,16 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
                     'suficiencia_orcamento': 2,
                     'comunicacao_cliente': 3,
                     'capacitacao_equipe': 4,
+                }
+            ],
+            [
+                {
+                    'projeto': 'AM do Amor',
+                    'modelo_gerenciamento': 'Agil',
+                    'nivel_retrabalho': 5,
+                    'variacao_escopo': None,
+                    'capacitacao_equipe': 4,
+                    'eficacia_metodologia': 2,
                 }
             ],
         ]
@@ -305,6 +352,7 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response['motivos_atraso'], [{'name': 'Comunicação com cliente', 'value': 1}])
         self.assertEqual(response['projetos_atuais'], [{'id': 1, 'projeto': 'AM do Amor'}])
         self.assertEqual(response['riscos']['suficiencia_orcamento'], [{'name': 'AM do Amor', 'value': 2}])
+        self.assertEqual(response['metodo_escopo']['retrabalho'], [{'name': 'AM do Amor', 'value': 5}])
 
 
 if __name__ == '__main__':
