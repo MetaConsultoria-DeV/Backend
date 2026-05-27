@@ -119,6 +119,34 @@ async def update_project_orientador_if_unknown(
     )
 
 
+def count_motivos_atraso(rows: list[dict]) -> list[dict]:
+    counts: dict[str, int] = {}
+
+    for row in rows:
+        raw_motivos = row.get('motivos_atraso')
+        if not raw_motivos:
+            continue
+
+        try:
+            parsed_motivos = json.loads(raw_motivos)
+        except (TypeError, json.JSONDecodeError):
+            parsed_motivos = [raw_motivos]
+
+        if isinstance(parsed_motivos, str):
+            parsed_motivos = [parsed_motivos]
+
+        for motivo in parsed_motivos:
+            if not motivo:
+                continue
+            motivo_label = str(motivo)
+            counts[motivo_label] = counts.get(motivo_label, 0) + 1
+
+    return [
+        {'name': name, 'value': value}
+        for name, value in sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    ]
+
+
 @app.get('/api/projetos/{projeto_id}')
 async def get_projeto_detalhes(projeto_id: int):
     query = '''
@@ -208,30 +236,6 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
             data.projeto_externo_id,
         )
         if not is_project_manager:
-            raise HTTPException(
-                status_code=400,
-                detail='Este projeto nÃ£o estÃ¡ vinculado Ã  gerente selecionada',
-            )
-
-        acomp_query = '''
-        INSERT INTO acompanhamento_projeto (
-            projeto_externo_id, contrato_id, data_resposta, modelo_gerenciamento,
-            pct_conclusao, status_cronograma, motivos_atraso,
-            capacitacao_equipe, eficacia_metodologia, nivel_retrabalho,
-            comunicacao_cliente, orcamento_nao_necessario,
-            primeira_resposta, cliente_percebeu_valor, pct_marcos_prazo,
-            variacao_escopo, impacto_cliente, abertura_cliente,
-            satisfacao_cliente, suficiencia_orcamento_nota, dados_iniciais_adicionais
-        )
-        SELECT %s, c.id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-        FROM contrato c
-        WHERE c.projeto_externo_id = %s
-        LIMIT 1
-        '''
-
-        motivos_str = json.dumps(data.motivos_atraso) if data.motivos_atraso else None
-        orcamento_nao_necessario = 1 if data.suficiencia_orcamento == 'Não necessitou' else 0
-        suficiencia_nota = int(data.suficiencia_orcamento) if data.suficiencia_orcamento and data.suficiencia_orcamento != 'Não necessitou' else None
         
         dados_iniciais = {
             "data_inicio": data.data_inicio,
@@ -334,27 +338,124 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
 @app.get('/api/dashboard/pape')
 async def get_dashboard_pape():
     try:
-        total_query = 'SELECT COUNT(*) as total FROM acompanhamento_projeto'
-        total_result = await asyncio.to_thread(execute_query, total_query, fetch_one=True)
-        total = total_result['total'] if total_result else 0
+        latest_filter = '''
+        NOT EXISTS (
+            SELECT 1
+            FROM acompanhamento_projeto ap2
+            WHERE ap2.projeto_externo_id = ap.projeto_externo_id
+              AND (
+                ap2.data_resposta > ap.data_resposta
+                OR (ap2.data_resposta = ap.data_resposta AND ap2.id > ap.id)
+              )
+        )
+        '''
 
-        sat_query = 'SELECT AVG(satisfacao_cliente) as media FROM acompanhamento_projeto WHERE satisfacao_cliente IS NOT NULL'
+        total_respostas_query = 'SELECT COUNT(*) as total FROM acompanhamento_projeto'
+        total_projetos_query = f'''
+        SELECT COUNT(*) as total
+        FROM acompanhamento_projeto ap
+        WHERE {latest_filter}
+        '''
+        sat_query = f'''
+        SELECT AVG(ap.satisfacao_cliente) as media
+        FROM acompanhamento_projeto ap
+        WHERE ap.satisfacao_cliente IS NOT NULL
+          AND {latest_filter}
+        '''
+        met_query = f'''
+        SELECT ap.modelo_gerenciamento, COUNT(*) as quantidade
+        FROM acompanhamento_projeto ap
+        WHERE {latest_filter}
+        GROUP BY ap.modelo_gerenciamento
+        '''
+        cron_query = f'''
+        SELECT ap.status_cronograma, COUNT(*) as quantidade
+        FROM acompanhamento_projeto ap
+        WHERE {latest_filter}
+        GROUP BY ap.status_cronograma
+        '''
+        conclusao_query = f'''
+        SELECT ap.pct_conclusao, COUNT(*) as quantidade
+        FROM acompanhamento_projeto ap
+        WHERE {latest_filter}
+        GROUP BY ap.pct_conclusao
+        ORDER BY FIELD(ap.pct_conclusao, '0-20%', '21-40%', '41-60%', '61-80%', '81-100%')
+        '''
+        motivos_query = f'''
+        SELECT ap.motivos_atraso
+        FROM acompanhamento_projeto ap
+        WHERE {latest_filter}
+          AND ap.status_cronograma IN ('Com risco de atraso', 'Atrasado')
+          AND ap.motivos_atraso IS NOT NULL
+        '''
+        projetos_query = f'''
+        SELECT
+            ap.projeto_externo_id as id,
+            pe.nome as projeto,
+            ap.status_cronograma,
+            ap.pct_conclusao,
+            ap.modelo_gerenciamento,
+            ap.data_resposta,
+            ap.satisfacao_cliente,
+            ap.impacto_cliente,
+            COALESCE((
+                SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
+                FROM membro_projeto mp
+                JOIN membro m ON m.id = mp.membro_id
+                JOIN cargo cg ON cg.id = mp.cargo_id
+                WHERE mp.projeto_externo_id = pe.id
+                  AND mp.data_saida IS NULL
+                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND LOWER(cg.nome) LIKE '%projeto%'
+            ), 'Sem gerente') as gerente,
+            COALESCE((
+                SELECT GROUP_CONCAT(DISTINCT co.nome ORDER BY co.nome SEPARATOR ', ')
+                FROM membro_projeto mp
+                JOIN coordenacao co ON co.id = mp.coordenacao_id
+                WHERE mp.projeto_externo_id = pe.id
+                  AND mp.data_saida IS NULL
+            ), 'Sem coordenação') as coordenacao
+        FROM acompanhamento_projeto ap
+        JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
+        WHERE {latest_filter}
+        ORDER BY
+            FIELD(ap.status_cronograma, 'Atrasado', 'Com risco de atraso', 'Dentro do prazo', 'Concluido'),
+            ap.data_resposta DESC,
+            pe.nome
+        LIMIT 12
+        '''
+
+        total_respostas_result = await asyncio.to_thread(
+            execute_query, total_respostas_query, fetch_one=True
+        )
+        total_projetos_result = await asyncio.to_thread(
+            execute_query, total_projetos_query, fetch_one=True
+        )
         sat_result = await asyncio.to_thread(execute_query, sat_query, fetch_one=True)
-        media_satisfacao = round(sat_result['media'], 1) if sat_result and sat_result['media'] else 0
-
-        met_query = 'SELECT modelo_gerenciamento, COUNT(*) as quantidade FROM acompanhamento_projeto GROUP BY modelo_gerenciamento'
         met_result = await asyncio.to_thread(execute_query, met_query, fetch_all=True)
-        metodologias = {row['modelo_gerenciamento']: row['quantidade'] for row in met_result} if met_result else {}
-
-        cron_query = 'SELECT status_cronograma, COUNT(*) as quantidade FROM acompanhamento_projeto GROUP BY status_cronograma'
         cron_result = await asyncio.to_thread(execute_query, cron_query, fetch_all=True)
+        conclusao_result = await asyncio.to_thread(
+            execute_query, conclusao_query, fetch_all=True
+        )
+        motivos_rows = await asyncio.to_thread(execute_query, motivos_query, fetch_all=True)
+        projetos_atuais = await asyncio.to_thread(execute_query, projetos_query, fetch_all=True)
+
+        total_respostas = total_respostas_result['total'] if total_respostas_result else 0
+        total_projetos = total_projetos_result['total'] if total_projetos_result else 0
+        media_satisfacao = round(sat_result['media'], 1) if sat_result and sat_result['media'] else 0
+        metodologias = {row['modelo_gerenciamento']: row['quantidade'] for row in met_result} if met_result else {}
         cronograma = {row['status_cronograma']: row['quantidade'] for row in cron_result} if cron_result else {}
+        conclusao = {row['pct_conclusao']: row['quantidade'] for row in conclusao_result} if conclusao_result else {}
 
         return {
-            'total_projetos': total,
+            'total_projetos': total_projetos,
+            'total_respostas': total_respostas,
             'media_satisfacao': media_satisfacao,
             'metodologias': metodologias,
-            'status_cronograma': cronograma
+            'status_cronograma': cronograma,
+            'pct_conclusao': conclusao,
+            'motivos_atraso': count_motivos_atraso(motivos_rows or []),
+            'projetos_atuais': projetos_atuais or [],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

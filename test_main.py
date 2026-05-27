@@ -209,5 +209,60 @@ class SubmitPapeValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params, (1, 'Dra. Camila', 3))
 
 
+class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    def test_count_motivos_atraso_accepts_json_lists_and_plain_text(self):
+        rows = [
+            {'motivos_atraso': '["Comunicação com cliente", "Capacidade técnica"]'},
+            {'motivos_atraso': '["Comunicação com cliente"]'},
+            {'motivos_atraso': 'Falta de recursos'},
+            {'motivos_atraso': None},
+        ]
+
+        result = self.main.count_motivos_atraso(rows)
+
+        self.assertEqual(
+            result,
+            [
+                {'name': 'Comunicação com cliente', 'value': 2},
+                {'name': 'Capacidade técnica', 'value': 1},
+                {'name': 'Falta de recursos', 'value': 1},
+            ],
+        )
+
+    async def test_get_dashboard_pape_uses_latest_project_answers(self):
+        expected_results = [
+            {'total': 12},
+            {'total': 8},
+            {'media': 4.25},
+            [{'modelo_gerenciamento': 'Ágil', 'quantidade': 3}],
+            [{'status_cronograma': 'Atrasado', 'quantidade': 2}],
+            [{'pct_conclusao': '61-80%', 'quantidade': 2}],
+            [{'motivos_atraso': '["Comunicação com cliente"]'}],
+            [{'id': 1, 'projeto': 'AM do Amor'}],
+        ]
+
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=expected_results) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = await self.main.get_dashboard_pape()
+
+        dashboard_queries = '\n'.join(call.args[0] for call in execute_query.call_args_list)
+        self.assertIn('NOT EXISTS', dashboard_queries)
+        self.assertIn('ap2.projeto_externo_id = ap.projeto_externo_id', dashboard_queries)
+        self.assertIn('GROUP BY ap.status_cronograma', dashboard_queries)
+        self.assertEqual(response['total_respostas'], 12)
+        self.assertEqual(response['total_projetos'], 8)
+        self.assertEqual(response['media_satisfacao'], 4.2)
+        self.assertEqual(response['motivos_atraso'], [{'name': 'Comunicação com cliente', 'value': 1}])
+        self.assertEqual(response['projetos_atuais'], [{'id': 1, 'projeto': 'AM do Amor'}])
+
+
 if __name__ == '__main__':
     unittest.main()
