@@ -411,6 +411,111 @@ def build_cliente_orientacao_dashboard(rows: list[dict]) -> dict:
     }
 
 
+def parse_csv_values(raw_value) -> list[str]:
+    if not raw_value:
+        return []
+
+    if isinstance(raw_value, list):
+        return [str(item).strip() for item in raw_value if str(item).strip()]
+
+    return [item.strip() for item in str(raw_value).split(',') if item.strip()]
+
+
+def normalize_yes(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'sim', 'true', 'yes')
+
+    return bool(value)
+
+
+def story_points_midpoint(value: str | None) -> int | None:
+    if not value:
+        return None
+
+    ranges = {
+        '0-20%': 10,
+        '21-40%': 30,
+        '41-60%': 50,
+        '61-80%': 70,
+        '81-100%': 90,
+    }
+    return ranges.get(value)
+
+
+def build_agil_dashboard(rows: list[dict]) -> dict:
+    story_counts: dict[str, int] = {}
+    impedimento_counts: dict[str, int] = {}
+    impacto_counts: dict[str, int] = {}
+    projetos: list[dict] = []
+    story_midpoints: list[int] = []
+    projetos_com_impedimento = 0
+    intervencoes_pmo = 0
+    solicitacoes_1_1 = 0
+
+    for row in rows:
+        projeto = row.get('projeto') or 'Projeto sem nome'
+        pct_story_points = row.get('pct_story_points') or 'Sem sprint'
+        impedimentos = parse_csv_values(row.get('impedimentos'))
+        impacto_cliente = row.get('impacto_cliente') or 'Sem impacto informado'
+        intervencao_pmo = row.get('intervencao_pmo') or 'Não informado'
+        one_on_one_pmo = row.get('one_on_one_pmo') or 'Não informado'
+
+        story_counts[pct_story_points] = story_counts.get(pct_story_points, 0) + 1
+        impacto_counts[impacto_cliente] = impacto_counts.get(impacto_cliente, 0) + 1
+
+        midpoint = story_points_midpoint(row.get('pct_story_points'))
+        if midpoint is not None:
+            story_midpoints.append(midpoint)
+
+        if impedimentos:
+            projetos_com_impedimento += 1
+        for impedimento in impedimentos:
+            impedimento_counts[impedimento] = impedimento_counts.get(impedimento, 0) + 1
+
+        if normalize_yes(intervencao_pmo):
+            intervencoes_pmo += 1
+        if normalize_yes(one_on_one_pmo):
+            solicitacoes_1_1 += 1
+
+        projetos.append({
+            'projeto': projeto,
+            'gerente': row.get('gerente') or 'Sem gerente',
+            'data_resposta': row.get('data_resposta'),
+            'impacto_cliente': impacto_cliente,
+            'pct_story_points': pct_story_points,
+            'impedimentos': impedimentos,
+            'intervencao_pmo': intervencao_pmo,
+            'one_on_one_pmo': one_on_one_pmo,
+        })
+
+    return {
+        'story_points': [
+            {'name': name, 'value': value}
+            for name, value in sorted(
+                story_counts.items(),
+                key=lambda item: story_points_midpoint(item[0]) or 0,
+                reverse=True,
+            )
+        ],
+        'impedimentos': [
+            {'name': name, 'value': value}
+            for name, value in sorted(impedimento_counts.items(), key=lambda item: item[1], reverse=True)
+        ],
+        'impactos': [
+            {'name': name, 'value': value}
+            for name, value in sorted(impacto_counts.items(), key=lambda item: item[1], reverse=True)
+        ],
+        'projetos': projetos,
+        'resumo': {
+            'total_projetos': len(projetos),
+            'media_story_points': round(sum(story_midpoints) / len(story_midpoints), 1) if story_midpoints else 0,
+            'projetos_com_impedimento': projetos_com_impedimento,
+            'intervencoes_pmo': intervencoes_pmo,
+            'solicitacoes_1_1': solicitacoes_1_1,
+        },
+    }
+
+
 @app.get('/api/projetos/{projeto_id}')
 async def get_projeto_detalhes(projeto_id: int):
     query = '''
@@ -765,6 +870,40 @@ async def get_dashboard_pape():
         WHERE {latest_filter}
         ORDER BY pe.nome
         '''
+        agil_query = f'''
+        SELECT
+            pe.nome as projeto,
+            ap.data_resposta,
+            ap.impacto_cliente,
+            acs.pct_story_points,
+            COALESCE(imp.impedimentos, '') as impedimentos,
+            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionados, '$.intervencao_pmo')) as intervencao_pmo,
+            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionados, '$.solicitou_1_1')) as one_on_one_pmo,
+            COALESCE((
+                SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
+                FROM membro_projeto mp
+                JOIN membro m ON m.id = mp.membro_id
+                JOIN cargo cg ON cg.id = mp.cargo_id
+                WHERE mp.projeto_externo_id = pe.id
+                  AND mp.data_saida IS NULL
+                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND LOWER(cg.nome) LIKE '%projeto%'
+            ), 'Sem gerente') as gerente
+        FROM acompanhamento_projeto ap
+        JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
+        LEFT JOIN acomp_sprint acs ON acs.acompanhamento_id = ap.id
+        LEFT JOIN (
+            SELECT acompanhamento_id, GROUP_CONCAT(tipo_impedimento ORDER BY tipo_impedimento SEPARATOR ', ') as impedimentos
+            FROM acomp_impedimento
+            GROUP BY acompanhamento_id
+        ) imp ON imp.acompanhamento_id = ap.id
+        WHERE {latest_filter}
+          AND (
+            ap.modelo_gerenciamento IN ('Ágil', 'Agil')
+            OR acs.pct_story_points IS NOT NULL
+          )
+        ORDER BY ap.data_resposta DESC, pe.nome
+        '''
 
         total_respostas_result = await asyncio.to_thread(
             execute_query, total_respostas_query, fetch_one=True
@@ -787,6 +926,7 @@ async def get_dashboard_pape():
         cliente_orientacao_rows = await asyncio.to_thread(
             execute_query, cliente_orientacao_query, fetch_all=True
         )
+        agil_rows = await asyncio.to_thread(execute_query, agil_query, fetch_all=True)
 
         total_respostas = total_respostas_result['total'] if total_respostas_result else 0
         total_projetos = total_projetos_result['total'] if total_projetos_result else 0
@@ -807,6 +947,7 @@ async def get_dashboard_pape():
             'riscos': build_riscos_dashboard(riscos_rows or []),
             'metodo_escopo': build_metodo_escopo_dashboard(metodo_escopo_rows or []),
             'cliente_orientacao': build_cliente_orientacao_dashboard(cliente_orientacao_rows or []),
+            'agil': build_agil_dashboard(agil_rows or []),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

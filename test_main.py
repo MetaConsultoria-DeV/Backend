@@ -349,6 +349,40 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['orientadores']['efetividade'][0], {'name': 'Cristiano Saad', 'value': 5.0})
         self.assertEqual(result['pontos_atencao'][0]['projeto'], 'Miller P(AI)')
 
+    def test_build_agil_dashboard_groups_story_points_and_impediments(self):
+        rows = [
+            {
+                'projeto': 'Miller P(AI)',
+                'gerente': 'Bryan Vidal',
+                'data_resposta': '2026-03-21',
+                'impacto_cliente': 'Leve',
+                'pct_story_points': '81-100%',
+                'impedimentos': 'Dependencia externa, Capacidade técnica',
+                'intervencao_pmo': 'Não',
+                'one_on_one_pmo': 'Sim',
+            },
+            {
+                'projeto': 'AM do Amor',
+                'gerente': 'Naylan Cardoso',
+                'data_resposta': '2026-03-10',
+                'impacto_cliente': 'Moderado',
+                'pct_story_points': '41-60%',
+                'impedimentos': None,
+                'intervencao_pmo': 'Sim',
+                'one_on_one_pmo': 'Não',
+            },
+        ]
+
+        result = self.main.build_agil_dashboard(rows)
+
+        self.assertEqual(result['story_points'][0], {'name': '81-100%', 'value': 1})
+        self.assertEqual(result['impedimentos'][0], {'name': 'Dependencia externa', 'value': 1})
+        self.assertEqual(result['projetos'][0]['projeto'], 'Miller P(AI)')
+        self.assertEqual(result['projetos'][0]['impedimentos'], ['Dependencia externa', 'Capacidade técnica'])
+        self.assertEqual(result['resumo']['media_story_points'], 70.0)
+        self.assertEqual(result['resumo']['projetos_com_impedimento'], 1)
+        self.assertEqual(result['resumo']['solicitacoes_1_1'], 1)
+
     async def test_get_dashboard_pape_uses_latest_project_answers(self):
         expected_results = [
             {'total': 12},
@@ -394,6 +428,18 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
                     'disponibilidade_orientador': 4,
                 }
             ],
+            [
+                {
+                    'projeto': 'Miller P(AI)',
+                    'gerente': 'Bryan Vidal',
+                    'data_resposta': '2026-03-21',
+                    'impacto_cliente': 'Leve',
+                    'pct_story_points': '81-100%',
+                    'impedimentos': 'Dependencia externa',
+                    'intervencao_pmo': 'Não',
+                    'one_on_one_pmo': 'Sim',
+                }
+            ],
         ]
 
         async def run_sync(func, *args, **kwargs):
@@ -417,6 +463,7 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response['riscos']['suficiencia_orcamento'], [{'name': 'AM do Amor', 'value': 2}])
         self.assertEqual(response['metodo_escopo']['retrabalho'], [{'name': 'AM do Amor', 'value': 5}])
         self.assertEqual(response['cliente_orientacao']['quantidade_orientadores'], 1)
+        self.assertEqual(response['agil']['resumo']['solicitacoes_1_1'], 1)
 
 
 if __name__ == '__main__':
