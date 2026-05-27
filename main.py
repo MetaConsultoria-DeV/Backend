@@ -236,6 +236,30 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
             data.projeto_externo_id,
         )
         if not is_project_manager:
+            raise HTTPException(
+                status_code=400,
+                detail='Este projeto não está vinculado à gerente selecionada',
+            )
+
+        acomp_query = '''
+        INSERT INTO acompanhamento_projeto (
+            projeto_externo_id, contrato_id, data_resposta, modelo_gerenciamento,
+            pct_conclusao, status_cronograma, motivos_atraso,
+            capacitacao_equipe, eficacia_metodologia, nivel_retrabalho,
+            comunicacao_cliente, orcamento_nao_necessario,
+            primeira_resposta, cliente_percebeu_valor, pct_marcos_prazo,
+            variacao_escopo, impacto_cliente, abertura_cliente,
+            satisfacao_cliente, suficiencia_orcamento_nota, dados_iniciais_adicionados
+        )
+        SELECT %s, c.id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        FROM contrato c
+        WHERE c.projeto_externo_id = %s
+        LIMIT 1
+        '''
+
+        motivos_str = json.dumps(data.motivos_atraso) if data.motivos_atraso else None
+        orcamento_nao_necessario = 1 if data.suficiencia_orcamento == 'Não necessitou' else 0
+        suficiencia_nota = int(data.suficiencia_orcamento) if data.suficiencia_orcamento and data.suficiencia_orcamento != 'Não necessitou' else None
         
         dados_iniciais = {
             "data_inicio": data.data_inicio,
