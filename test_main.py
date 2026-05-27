@@ -300,6 +300,55 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['pontos_atencao'][0]['projeto'], 'Miller P(AI)')
         self.assertEqual(result['pontos_atencao'][0]['indicador'], 'Eficácia da metodologia')
 
+    def test_build_cliente_orientacao_dashboard_aggregates_client_and_advisor_scores(self):
+        rows = [
+            {
+                'projeto': 'AM do Amor',
+                'comunicacao_cliente': 4,
+                'abertura_cliente': 5,
+                'satisfacao_cliente': 5,
+                'cliente_percebeu_valor': 3,
+                'impacto_cliente': 'Moderado',
+                'possui_orientador': 1,
+                'nome_orientador': 'Cristiano Saad',
+                'efetividade_orientador': 5,
+                'disponibilidade_orientador': 4,
+            },
+            {
+                'projeto': 'Miller P(AI)',
+                'comunicacao_cliente': 2,
+                'abertura_cliente': 3,
+                'satisfacao_cliente': 3,
+                'cliente_percebeu_valor': 4,
+                'impacto_cliente': 'Leve',
+                'possui_orientador': 1,
+                'nome_orientador': 'Jose Kimio',
+                'efetividade_orientador': 4,
+                'disponibilidade_orientador': 5,
+            },
+            {
+                'projeto': 'FEMEA no Mar',
+                'comunicacao_cliente': 3,
+                'abertura_cliente': 2,
+                'satisfacao_cliente': 2,
+                'cliente_percebeu_valor': None,
+                'impacto_cliente': None,
+                'possui_orientador': 0,
+                'nome_orientador': None,
+                'efetividade_orientador': None,
+                'disponibilidade_orientador': None,
+            },
+        ]
+
+        result = self.main.build_cliente_orientacao_dashboard(rows)
+
+        self.assertEqual(result['comunicacao_cliente'][0], {'name': 'Miller P(AI)', 'value': 2})
+        self.assertEqual(result['confianca_cliente'][0], {'name': 'FEMEA no Mar', 'value': 2})
+        self.assertEqual(result['quantidade_orientadores'], 2)
+        self.assertEqual(result['projetos_com_orientacao_pct'], 66.7)
+        self.assertEqual(result['orientadores']['efetividade'][0], {'name': 'Cristiano Saad', 'value': 5.0})
+        self.assertEqual(result['pontos_atencao'][0]['projeto'], 'Miller P(AI)')
+
     async def test_get_dashboard_pape_uses_latest_project_answers(self):
         expected_results = [
             {'total': 12},
@@ -331,6 +380,20 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
                     'eficacia_metodologia': 2,
                 }
             ],
+            [
+                {
+                    'projeto': 'AM do Amor',
+                    'comunicacao_cliente': 4,
+                    'abertura_cliente': 5,
+                    'satisfacao_cliente': 5,
+                    'cliente_percebeu_valor': 3,
+                    'impacto_cliente': 'Moderado',
+                    'possui_orientador': 1,
+                    'nome_orientador': 'Cristiano Saad',
+                    'efetividade_orientador': 5,
+                    'disponibilidade_orientador': 4,
+                }
+            ],
         ]
 
         async def run_sync(func, *args, **kwargs):
@@ -353,6 +416,7 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response['projetos_atuais'], [{'id': 1, 'projeto': 'AM do Amor'}])
         self.assertEqual(response['riscos']['suficiencia_orcamento'], [{'name': 'AM do Amor', 'value': 2}])
         self.assertEqual(response['metodo_escopo']['retrabalho'], [{'name': 'AM do Amor', 'value': 5}])
+        self.assertEqual(response['cliente_orientacao']['quantidade_orientadores'], 1)
 
 
 if __name__ == '__main__':

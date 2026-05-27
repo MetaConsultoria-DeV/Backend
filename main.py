@@ -288,6 +288,129 @@ def build_metodo_escopo_dashboard(rows: list[dict]) -> dict:
     }
 
 
+def average_score(items: list[dict]) -> float:
+    if not items:
+        return 0
+
+    return round(sum(item['value'] for item in items) / len(items), 1)
+
+
+def has_orientador(row: dict) -> bool:
+    raw_value = row.get('possui_orientador')
+    orientador = row.get('nome_orientador')
+
+    if isinstance(raw_value, str):
+        has_flag = raw_value.strip().lower() in ('1', 'sim', 'true')
+    else:
+        has_flag = bool(raw_value)
+
+    return has_flag or bool(orientador)
+
+
+def build_cliente_orientacao_dashboard(rows: list[dict]) -> dict:
+    fields = [
+        ('comunicacao_cliente', 'comunicacao_cliente', 'Comunicação efetiva'),
+        ('abertura_cliente', 'confianca_cliente', 'Confiança do cliente'),
+        ('satisfacao_cliente', 'satisfacao_cliente', 'Satisfação do cliente'),
+        ('cliente_percebeu_valor', 'valorizacao_cliente', 'Valorização pelo cliente'),
+    ]
+    series: dict[str, list[dict]] = {result_key: [] for _, result_key, _ in fields}
+    pontos_atencao: list[dict] = []
+    impactos: list[dict] = []
+    orientadores: dict[str, dict[str, list[int]]] = {}
+    projetos_com_orientacao = 0
+
+    for row in rows:
+        projeto = row.get('projeto') or 'Projeto sem nome'
+        orientador = row.get('nome_orientador') or 'Sem orientador'
+        projeto_tem_orientador = has_orientador(row)
+
+        if projeto_tem_orientador:
+            projetos_com_orientacao += 1
+
+        for field, result_key, label in fields:
+            score = parse_score(row.get(field))
+            if score is None:
+                continue
+
+            series[result_key].append({
+                'name': projeto,
+                'value': score,
+            })
+
+            if score <= 2:
+                pontos_atencao.append({
+                    'projeto': projeto,
+                    'indicador': label,
+                    'nota': score,
+                    'orientador': orientador if projeto_tem_orientador else 'Sem orientador',
+                })
+
+        impactos.append({
+            'projeto': projeto,
+            'impacto_cliente': row.get('impacto_cliente') or 'Sem impacto informado',
+            'cliente_percebeu_valor': parse_score(row.get('cliente_percebeu_valor')),
+            'orientador': orientador if projeto_tem_orientador else 'Sem orientador',
+        })
+
+        if projeto_tem_orientador:
+            orientadores.setdefault(orientador, {
+                'efetividade': [],
+                'disponibilidade': [],
+            })
+            efetividade = parse_score(row.get('efetividade_orientador'))
+            disponibilidade = parse_score(row.get('disponibilidade_orientador'))
+
+            if efetividade is not None:
+                orientadores[orientador]['efetividade'].append(efetividade)
+            if disponibilidade is not None:
+                orientadores[orientador]['disponibilidade'].append(disponibilidade)
+
+    orientador_efetividade = []
+    orientador_disponibilidade = []
+    for orientador, scores in orientadores.items():
+        if scores['efetividade']:
+            orientador_efetividade.append({
+                'name': orientador,
+                'value': round(sum(scores['efetividade']) / len(scores['efetividade']), 1),
+            })
+        if scores['disponibilidade']:
+            orientador_disponibilidade.append({
+                'name': orientador,
+                'value': round(sum(scores['disponibilidade']) / len(scores['disponibilidade']), 1),
+            })
+
+    total_projetos = len(rows)
+    projetos_com_orientacao_pct = (
+        round((projetos_com_orientacao / total_projetos) * 100, 1)
+        if total_projetos
+        else 0
+    )
+
+    return {
+        'comunicacao_cliente': sorted(series['comunicacao_cliente'], key=lambda item: (item['value'], item['name'])),
+        'confianca_cliente': sorted(series['confianca_cliente'], key=lambda item: (item['value'], item['name'])),
+        'satisfacao_cliente': sorted(series['satisfacao_cliente'], key=lambda item: (item['value'], item['name'])),
+        'valorizacao_cliente': sorted(series['valorizacao_cliente'], key=lambda item: (item['value'], item['name'])),
+        'orientadores': {
+            'efetividade': sorted(orientador_efetividade, key=lambda item: item['value'], reverse=True),
+            'disponibilidade': sorted(orientador_disponibilidade, key=lambda item: item['value'], reverse=True),
+        },
+        'impactos': impactos,
+        'pontos_atencao': sorted(pontos_atencao, key=lambda item: item['nota']),
+        'quantidade_orientadores': len(orientadores),
+        'projetos_com_orientacao_pct': projetos_com_orientacao_pct,
+        'medias': {
+            'comunicacao_cliente': average_score(series['comunicacao_cliente']),
+            'confianca_cliente': average_score(series['confianca_cliente']),
+            'satisfacao_cliente': average_score(series['satisfacao_cliente']),
+            'valorizacao_cliente': average_score(series['valorizacao_cliente']),
+            'efetividade_orientador': average_score(orientador_efetividade),
+            'disponibilidade_orientador': average_score(orientador_disponibilidade),
+        },
+    }
+
+
 @app.get('/api/projetos/{projeto_id}')
 async def get_projeto_detalhes(projeto_id: int):
     query = '''
@@ -624,6 +747,24 @@ async def get_dashboard_pape():
         WHERE {latest_filter}
         ORDER BY pe.nome
         '''
+        cliente_orientacao_query = f'''
+        SELECT
+            pe.nome as projeto,
+            ap.comunicacao_cliente,
+            ap.abertura_cliente,
+            ap.satisfacao_cliente,
+            ap.cliente_percebeu_valor,
+            ap.impacto_cliente,
+            COALESCE(ao.possui_orientador, pe.possui_orientador, 0) as possui_orientador,
+            COALESCE(ao.nome_orientador, pe.nome_orientador) as nome_orientador,
+            ao.efetividade_orientador,
+            ao.disponibilidade_orientador
+        FROM acompanhamento_projeto ap
+        JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
+        LEFT JOIN acomp_orientador ao ON ao.acompanhamento_id = ap.id
+        WHERE {latest_filter}
+        ORDER BY pe.nome
+        '''
 
         total_respostas_result = await asyncio.to_thread(
             execute_query, total_respostas_query, fetch_one=True
@@ -642,6 +783,9 @@ async def get_dashboard_pape():
         riscos_rows = await asyncio.to_thread(execute_query, riscos_query, fetch_all=True)
         metodo_escopo_rows = await asyncio.to_thread(
             execute_query, metodo_escopo_query, fetch_all=True
+        )
+        cliente_orientacao_rows = await asyncio.to_thread(
+            execute_query, cliente_orientacao_query, fetch_all=True
         )
 
         total_respostas = total_respostas_result['total'] if total_respostas_result else 0
@@ -662,6 +806,7 @@ async def get_dashboard_pape():
             'projetos_atuais': projetos_atuais or [],
             'riscos': build_riscos_dashboard(riscos_rows or []),
             'metodo_escopo': build_metodo_escopo_dashboard(metodo_escopo_rows or []),
+            'cliente_orientacao': build_cliente_orientacao_dashboard(cliente_orientacao_rows or []),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
