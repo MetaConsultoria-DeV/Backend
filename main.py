@@ -442,6 +442,20 @@ def story_points_midpoint(value: str | None) -> int | None:
     return ranges.get(value)
 
 
+def completion_midpoint(value: str | None) -> int | None:
+    if not value:
+        return None
+
+    ranges = {
+        '0-20%': 10,
+        '21-40%': 30,
+        '41-60%': 50,
+        '61-80%': 70,
+        '81-100%': 90,
+    }
+    return ranges.get(value)
+
+
 def build_agil_dashboard(rows: list[dict]) -> dict:
     story_counts: dict[str, int] = {}
     impedimento_counts: dict[str, int] = {}
@@ -513,6 +527,158 @@ def build_agil_dashboard(rows: list[dict]) -> dict:
             'intervencoes_pmo': intervencoes_pmo,
             'solicitacoes_1_1': solicitacoes_1_1,
         },
+    }
+
+
+def format_dashboard_date(value) -> str:
+    if not value:
+        return 'Sem data'
+
+    if hasattr(value, 'strftime'):
+        return value.strftime('%d/%m/%Y')
+
+    try:
+        return datetime.fromisoformat(str(value)).strftime('%d/%m/%Y')
+    except ValueError:
+        return str(value)
+
+
+def build_detalhe_dashboard(rows: list[dict], selected_project_id: int | None = None) -> dict:
+    if not rows:
+        return {
+            'projeto_foco': None,
+            'metricas': {},
+            'andamento': [],
+            'motivos_atraso': [],
+            'historico': [],
+            'projetos': [],
+        }
+
+    latest_by_project: dict[int | str, dict] = {}
+    for row in rows:
+        project_key = row.get('projeto_id') or row.get('projeto')
+        current_latest = latest_by_project.get(project_key)
+
+        if current_latest is None:
+            latest_by_project[project_key] = row
+            continue
+
+        current_order = (str(current_latest.get('data_resposta') or ''), current_latest.get('id') or 0)
+        candidate_order = (str(row.get('data_resposta') or ''), row.get('id') or 0)
+        if candidate_order > current_order:
+            latest_by_project[project_key] = row
+
+    status_priority = {
+        'Atrasado': 0,
+        'Com risco de atraso': 1,
+        'Dentro do prazo': 2,
+        'Concluido': 3,
+        'Concluído': 3,
+    }
+    latest_rows = list(latest_by_project.values())
+
+    focus_row = None
+    if selected_project_id is not None:
+        try:
+            sel_id = int(selected_project_id)
+            for r in latest_rows:
+                if r.get('projeto_id') == sel_id:
+                    focus_row = r
+                    break
+        except (ValueError, TypeError):
+            pass
+
+    if focus_row is None:
+        focus_row = sorted(
+            latest_rows,
+            key=lambda row: (
+                status_priority.get(row.get('status_cronograma'), 9),
+                -(completion_midpoint(row.get('pct_conclusao')) or 0),
+                str(row.get('projeto') or ''),
+            ),
+        )[0]
+    focus_key = focus_row.get('projeto_id') or focus_row.get('projeto')
+    focus_history = [
+        row
+        for row in rows
+        if (row.get('projeto_id') or row.get('projeto')) == focus_key
+    ]
+    focus_history = sorted(
+        focus_history,
+        key=lambda row: (str(row.get('data_resposta') or ''), row.get('id') or 0),
+    )
+
+    projeto_foco = {
+        'projeto_id': focus_row.get('projeto_id'),
+        'projeto': focus_row.get('projeto') or 'Projeto sem nome',
+        'gerente': focus_row.get('gerente') or 'Sem gerente',
+        'status_cronograma': focus_row.get('status_cronograma') or 'Sem status',
+        'pct_conclusao': focus_row.get('pct_conclusao') or 'Sem conclusão',
+        'data_resposta': focus_row.get('data_resposta'),
+        'impacto_cliente': focus_row.get('impacto_cliente') or 'Sem impacto informado',
+        'intervencao_pmo': focus_row.get('intervencao_pmo') or 'Não informado',
+        'one_on_one_pmo': focus_row.get('one_on_one_pmo') or 'Não informado',
+    }
+
+    metricas = {
+        'confianca_cliente': parse_score(focus_row.get('abertura_cliente')) or 0,
+        'comunicacao_cliente': parse_score(focus_row.get('comunicacao_cliente')) or 0,
+        'eficacia_metodologia': parse_score(focus_row.get('eficacia_metodologia')) or 0,
+        'capacitacao_equipe': parse_score(focus_row.get('capacitacao_equipe')) or 0,
+        'nivel_retrabalho': parse_score(focus_row.get('nivel_retrabalho')) or 0,
+        'suficiencia_orcamento': parse_score(focus_row.get('suficiencia_orcamento')) or 0,
+    }
+
+    historico = []
+    andamento = []
+    for row in focus_history:
+        historico.append({
+            'data_resposta': str(row.get('data_resposta')) if row.get('data_resposta') else None,
+            'status_cronograma': row.get('status_cronograma') or 'Sem status',
+            'pct_conclusao': row.get('pct_conclusao') or 'Sem conclusão',
+            'impacto_cliente': row.get('impacto_cliente') or 'Sem impacto informado',
+            'intervencao_pmo': row.get('intervencao_pmo') or 'Não informado',
+            'one_on_one_pmo': row.get('one_on_one_pmo') or 'Não informado',
+            'confianca_cliente': parse_score(row.get('abertura_cliente')) or 0,
+            'comunicacao_cliente': parse_score(row.get('comunicacao_cliente')) or 0,
+            'eficacia_metodologia': parse_score(row.get('eficacia_metodologia')) or 0,
+            'capacitacao_equipe': parse_score(row.get('capacitacao_equipe')) or 0,
+            'nivel_retrabalho': parse_score(row.get('nivel_retrabalho')) or 0,
+            'suficiencia_orcamento': parse_score(row.get('suficiencia_orcamento')) or 0,
+            'motivos_atraso': parse_motivos_atraso(row.get('motivos_atraso')),
+        })
+        midpoint = completion_midpoint(row.get('pct_conclusao'))
+        if midpoint is not None:
+            andamento.append({
+                'name': format_dashboard_date(row.get('data_resposta')),
+                'value': midpoint,
+            })
+
+    projetos = [
+        {
+            'projeto_id': row.get('projeto_id'),
+            'projeto': row.get('projeto') or 'Projeto sem nome',
+            'gerente': row.get('gerente') or 'Sem gerente',
+            'status_cronograma': row.get('status_cronograma') or 'Sem status',
+            'pct_conclusao': row.get('pct_conclusao') or 'Sem conclusão',
+            'data_resposta': row.get('data_resposta'),
+        }
+        for row in sorted(
+            latest_rows,
+            key=lambda row: (
+                status_priority.get(row.get('status_cronograma'), 9),
+                str(row.get('projeto') or ''),
+            ),
+        )
+    ]
+
+    return {
+        'projeto_foco': projeto_foco,
+        'metricas': metricas,
+        'andamento': andamento,
+        'motivos_atraso': count_motivos_atraso(focus_history),
+        'historico': historico,
+        'projetos': projetos,
     }
 
 
@@ -729,7 +895,7 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
 
 
 @app.get('/api/dashboard/pape')
-async def get_dashboard_pape():
+async def get_dashboard_pape(projeto_id: int | None = None):
     try:
         latest_filter = '''
         NOT EXISTS (
@@ -904,6 +1070,38 @@ async def get_dashboard_pape():
           )
         ORDER BY ap.data_resposta DESC, pe.nome
         '''
+        detalhe_query = '''
+        SELECT
+            ap.id,
+            ap.projeto_externo_id as projeto_id,
+            pe.nome as projeto,
+            ap.data_resposta,
+            ap.status_cronograma,
+            ap.pct_conclusao,
+            ap.impacto_cliente,
+            ap.motivos_atraso,
+            ap.comunicacao_cliente,
+            ap.abertura_cliente,
+            ap.eficacia_metodologia,
+            ap.capacitacao_equipe,
+            ap.nivel_retrabalho,
+            COALESCE(ap.suficiencia_orcamento_nota, ap.suficiencia_orcamento) as suficiencia_orcamento,
+            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionados, '$.intervencao_pmo')) as intervencao_pmo,
+            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionados, '$.solicitou_1_1')) as one_on_one_pmo,
+            COALESCE((
+                SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
+                FROM membro_projeto mp
+                JOIN membro m ON m.id = mp.membro_id
+                JOIN cargo cg ON cg.id = mp.cargo_id
+                WHERE mp.projeto_externo_id = pe.id
+                  AND mp.data_saida IS NULL
+                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND LOWER(cg.nome) LIKE '%projeto%'
+            ), 'Sem gerente') as gerente
+        FROM acompanhamento_projeto ap
+        JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
+        ORDER BY pe.nome, ap.data_resposta, ap.id
+        '''
 
         total_respostas_result = await asyncio.to_thread(
             execute_query, total_respostas_query, fetch_one=True
@@ -927,6 +1125,7 @@ async def get_dashboard_pape():
             execute_query, cliente_orientacao_query, fetch_all=True
         )
         agil_rows = await asyncio.to_thread(execute_query, agil_query, fetch_all=True)
+        detalhe_rows = await asyncio.to_thread(execute_query, detalhe_query, fetch_all=True)
 
         total_respostas = total_respostas_result['total'] if total_respostas_result else 0
         total_projetos = total_projetos_result['total'] if total_projetos_result else 0
@@ -948,6 +1147,7 @@ async def get_dashboard_pape():
             'metodo_escopo': build_metodo_escopo_dashboard(metodo_escopo_rows or []),
             'cliente_orientacao': build_cliente_orientacao_dashboard(cliente_orientacao_rows or []),
             'agil': build_agil_dashboard(agil_rows or []),
+            'detalhe': build_detalhe_dashboard(detalhe_rows or [], projeto_id),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

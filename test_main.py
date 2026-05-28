@@ -383,6 +383,79 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['resumo']['projetos_com_impedimento'], 1)
         self.assertEqual(result['resumo']['solicitacoes_1_1'], 1)
 
+    def test_build_detalhe_dashboard_focuses_priority_project_history(self):
+        rows = [
+            {
+                'id': 1,
+                'projeto_id': 10,
+                'projeto': 'Protege Católica',
+                'gerente': 'Victor Hugo',
+                'data_resposta': '2026-01-07',
+                'status_cronograma': 'Com risco de atraso',
+                'pct_conclusao': '0-20%',
+                'impacto_cliente': 'Moderado',
+                'motivos_atraso': '["Comunicação com cliente"]',
+                'comunicacao_cliente': 3,
+                'abertura_cliente': 2,
+                'eficacia_metodologia': 2,
+                'capacitacao_equipe': 2,
+                'nivel_retrabalho': 2,
+                'suficiencia_orcamento': 3,
+                'intervencao_pmo': 'Não',
+                'one_on_one_pmo': 'Não',
+            },
+            {
+                'id': 2,
+                'projeto_id': 10,
+                'projeto': 'Protege Católica',
+                'gerente': 'Victor Hugo',
+                'data_resposta': '2026-03-26',
+                'status_cronograma': 'Atrasado',
+                'pct_conclusao': '61-80%',
+                'impacto_cliente': 'Moderado',
+                'motivos_atraso': '["Capacidade técnica", "Comunicação com cliente"]',
+                'comunicacao_cliente': 2,
+                'abertura_cliente': 2,
+                'eficacia_metodologia': 1,
+                'capacitacao_equipe': 2,
+                'nivel_retrabalho': 2,
+                'suficiencia_orcamento': 3,
+                'intervencao_pmo': 'Não',
+                'one_on_one_pmo': 'Sim',
+            },
+            {
+                'id': 3,
+                'projeto_id': 11,
+                'projeto': 'AM do Amor',
+                'gerente': 'Naylan Cardoso',
+                'data_resposta': '2026-03-10',
+                'status_cronograma': 'Dentro do prazo',
+                'pct_conclusao': '41-60%',
+                'impacto_cliente': 'Leve',
+                'motivos_atraso': None,
+                'comunicacao_cliente': 4,
+                'abertura_cliente': 5,
+                'eficacia_metodologia': 4,
+                'capacitacao_equipe': 4,
+                'nivel_retrabalho': 5,
+                'suficiencia_orcamento': 4,
+                'intervencao_pmo': 'Não',
+                'one_on_one_pmo': 'Não',
+            },
+        ]
+
+        result = self.main.build_detalhe_dashboard(rows)
+
+        self.assertEqual(result['projeto_foco']['projeto'], 'Protege Católica')
+        self.assertEqual(result['projeto_foco']['status_cronograma'], 'Atrasado')
+        self.assertEqual(result['andamento'], [
+            {'name': '07/01/2026', 'value': 10},
+            {'name': '26/03/2026', 'value': 70},
+        ])
+        self.assertEqual(result['metricas']['eficacia_metodologia'], 1)
+        self.assertEqual(result['motivos_atraso'][0], {'name': 'Comunicação com cliente', 'value': 2})
+        self.assertEqual(len(result['historico']), 2)
+
     async def test_get_dashboard_pape_uses_latest_project_answers(self):
         expected_results = [
             {'total': 12},
@@ -440,6 +513,27 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
                     'one_on_one_pmo': 'Sim',
                 }
             ],
+            [
+                {
+                    'id': 2,
+                    'projeto_id': 10,
+                    'projeto': 'Protege Católica',
+                    'gerente': 'Victor Hugo',
+                    'data_resposta': '2026-03-26',
+                    'status_cronograma': 'Atrasado',
+                    'pct_conclusao': '61-80%',
+                    'impacto_cliente': 'Moderado',
+                    'motivos_atraso': '["Capacidade técnica"]',
+                    'comunicacao_cliente': 2,
+                    'abertura_cliente': 2,
+                    'eficacia_metodologia': 1,
+                    'capacitacao_equipe': 2,
+                    'nivel_retrabalho': 2,
+                    'suficiencia_orcamento': 3,
+                    'intervencao_pmo': 'Não',
+                    'one_on_one_pmo': 'Sim',
+                }
+            ],
         ]
 
         async def run_sync(func, *args, **kwargs):
@@ -464,6 +558,7 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response['metodo_escopo']['retrabalho'], [{'name': 'AM do Amor', 'value': 5}])
         self.assertEqual(response['cliente_orientacao']['quantidade_orientadores'], 1)
         self.assertEqual(response['agil']['resumo']['solicitacoes_1_1'], 1)
+        self.assertEqual(response['detalhe']['projeto_foco']['projeto'], 'Protege Católica')
 
 
 if __name__ == '__main__':
