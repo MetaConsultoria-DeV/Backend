@@ -890,14 +890,9 @@ async def get_projeto_detalhes(projeto_id: int):
         projeto['membros'] = membros or []
         
         # Formatar campos complexos nos acompanhamentos (JSON de motivos de atraso)
+        # Usar parse_motivos_atraso para garantir decodificação de unicode escapes
         for acomp in (acompanhamentos or []):
-            if acomp.get('motivos_atraso'):
-                try:
-                    acomp['motivos_atraso'] = json.loads(acomp['motivos_atraso'])
-                except Exception:
-                    acomp['motivos_atraso'] = [acomp['motivos_atraso']]
-            else:
-                acomp['motivos_atraso'] = []
+            acomp['motivos_atraso'] = parse_motivos_atraso(acomp.get('motivos_atraso'))
 
         projeto['acompanhamentos'] = acompanhamentos or []
         return projeto
