@@ -1028,6 +1028,7 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
         suficiencia_nota = int(data.suficiencia_orcamento) if data.suficiencia_orcamento and data.suficiencia_orcamento != 'Não necessitou' else None
         
         dados_iniciais = {
+            "descricao_projeto": data.descricao_projeto,
             "data_inicio": data.data_inicio,
             "numero_contrato": data.numero_contrato,
             "valor_projeto": data.valor_projeto,

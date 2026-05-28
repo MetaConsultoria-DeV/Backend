@@ -63,6 +63,7 @@ class PapeFormData(BaseModel):
     primeira_resposta: Literal['Sim', 'Não']
 
     # Procedimentos Iniciais (condicional)
+    descricao_projeto: Optional[str] = None
     data_inicio: Optional[str] = None
     numero_contrato: Optional[str] = None
     valor_projeto: Optional[str] = None
