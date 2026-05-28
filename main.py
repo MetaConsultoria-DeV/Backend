@@ -132,7 +132,7 @@ async def get_all_projetos():
             projetos.append({
                 'id': r['id'],
                 'nome': r['nome'],
-                'numero_contrato': r['numero_contrato'],
+                'numero_contrato': r['numero_contrato'] if r['numero_contrato'] and not r['numero_contrato'].startswith('CONTRATO-TEMP') else None,
                 'gerente': r['gerente'] or 'Sem gerente',
                 'status': status
             })
