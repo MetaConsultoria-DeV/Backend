@@ -192,7 +192,7 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
             return func(*args, **kwargs)
 
         with (
-            patch.object(self.main, 'execute_query', side_effect=[projeto_row, [], []]) as execute_query,
+            patch.object(self.main, 'execute_query', side_effect=[projeto_row, [], [], [], []]) as execute_query,
             patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
         ):
             response = await self.main.get_projeto_detalhes(1)

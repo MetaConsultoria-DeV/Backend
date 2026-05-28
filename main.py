@@ -830,7 +830,7 @@ def build_detalhe_dashboard(rows: list[dict], selected_project_id: int | None = 
 @app.get('/api/projetos/{projeto_id}')
 async def get_projeto_detalhes(projeto_id: int):
     query = '''
-    SELECT pe.id, pe.nome, pe.data_inicio, c.numero as numero_contrato,
+    SELECT pe.id, pe.nome, pe.descricao, pe.descricao_projeto, pe.data_inicio, c.numero as numero_contrato,
            c.valor_total, pe.possui_orientador, pe.nome_orientador
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
@@ -854,13 +854,52 @@ async def get_projeto_detalhes(projeto_id: int):
         JOIN coordenacao c ON c.id = s.coordenacao_id
         WHERE ps.projeto_externo_id = %s
         '''
-        servicos, coordenacoes = await asyncio.gather(
+        membros_query = '''
+        SELECT m.id, m.nome, m.email, cg.nome as cargo, co.nome as coordenacao, co.sigla as coordenacao_sigla
+        FROM membro_projeto mp
+        JOIN membro m ON m.id = mp.membro_id
+        JOIN cargo cg ON cg.id = mp.cargo_id
+        LEFT JOIN coordenacao co ON co.id = mp.coordenacao_id
+        WHERE mp.projeto_externo_id = %s
+          AND mp.data_saida IS NULL
+        ORDER BY m.nome
+        '''
+        acompanhamentos_query = '''
+        SELECT ap.id, ap.data_resposta, ap.modelo_gerenciamento, ap.pct_conclusao,
+               ap.status_cronograma, ap.motivos_atraso, ap.capacitacao_equipe,
+               ap.eficacia_metodologia, ap.nivel_retrabalho, ap.comunicacao_cliente,
+               ap.suficiencia_orcamento_nota, ap.orcamento_nao_necessario,
+               ap.cliente_percebeu_valor, ap.pct_marcos_prazo, ap.variacao_escopo,
+               ap.impacto_cliente, ap.abertura_cliente, ap.satisfacao_cliente,
+               ao.nome_orientador, ao.efetividade_orientador, ao.disponibilidade_orientador
+        FROM acompanhamento_projeto ap
+        LEFT JOIN acomp_orientador ao ON ao.acompanhamento_id = ap.id
+        WHERE ap.projeto_externo_id = %s
+        ORDER BY ap.data_resposta DESC, ap.id DESC
+        '''
+
+        servicos, coordenacoes, membros, acompanhamentos = await asyncio.gather(
             asyncio.to_thread(execute_query, servicos_query, (projeto_id,), fetch_all=True),
             asyncio.to_thread(execute_query, coordenacoes_query, (projeto_id,), fetch_all=True),
+            asyncio.to_thread(execute_query, membros_query, (projeto_id,), fetch_all=True),
+            asyncio.to_thread(execute_query, acompanhamentos_query, (projeto_id,), fetch_all=True)
         )
 
         projeto['servicos'] = servicos or []
         projeto['coordenacoes'] = coordenacoes or []
+        projeto['membros'] = membros or []
+        
+        # Formatar campos complexos nos acompanhamentos (JSON de motivos de atraso)
+        for acomp in (acompanhamentos or []):
+            if acomp.get('motivos_atraso'):
+                try:
+                    acomp['motivos_atraso'] = json.loads(acomp['motivos_atraso'])
+                except Exception:
+                    acomp['motivos_atraso'] = [acomp['motivos_atraso']]
+            else:
+                acomp['motivos_atraso'] = []
+
+        projeto['acompanhamentos'] = acompanhamentos or []
         return projeto
     except HTTPException:
         raise
