@@ -12,6 +12,15 @@ class Projeto(BaseModel):
     nome_orientador: Optional[str] = None
 
 
+class ProjetoListItem(BaseModel):
+    id: int
+    nome: str
+    numero_contrato: Optional[str] = None
+    gerente: Optional[str] = None
+    status: Literal['ativo', 'finalizado', 'pausado']
+
+
+
 class Coordenacao(BaseModel):
     id: int
     nome: str

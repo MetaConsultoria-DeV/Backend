@@ -4,7 +4,7 @@ from datetime import datetime
 import asyncio
 import httpx
 import json
-from models import Projeto, Coordenacao, Membro, PapeFormData
+from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem
 from database import execute_query, execute_insert
 import os
 from dotenv import load_dotenv
@@ -72,6 +72,71 @@ async def get_projetos(gerente_id: int | None = None):
         return resultado or []
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/api/projetos/all', response_model=list[ProjetoListItem])
+async def get_all_projetos():
+    query = '''
+    SELECT 
+        pe.id, 
+        pe.nome, 
+        c.numero as numero_contrato,
+        c.finalizado_em,
+        c.fase_atual,
+        pe.descricao,
+        (
+            SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
+            FROM membro_projeto mp
+            JOIN membro m ON m.id = mp.membro_id
+            JOIN cargo cg ON cg.id = mp.cargo_id
+            WHERE mp.projeto_externo_id = pe.id
+              AND mp.data_saida IS NULL
+              AND LOWER(cg.nome) LIKE '%gerente%'
+              AND LOWER(cg.nome) LIKE '%projeto%'
+        ) as gerente,
+        (
+            SELECT ap.status_cronograma
+            FROM acompanhamento_projeto ap
+            WHERE ap.projeto_externo_id = pe.id
+            ORDER BY ap.data_resposta DESC, ap.id DESC
+            LIMIT 1
+        ) as status_cronograma
+    FROM projeto_externo pe
+    LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
+    ORDER BY pe.nome
+    '''
+    try:
+        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+        if not resultado:
+            return []
+        
+        projetos = []
+        for r in resultado:
+            status = 'ativo'
+            # 1. Finalizado
+            if (
+                r.get('finalizado_em') is not None or 
+                r.get('fase_atual') in ('Concluido', 'Cancelado') or
+                r.get('status_cronograma') == 'Concluido'
+            ):
+                status = 'finalizado'
+            # 2. Pausado
+            elif (
+                (r.get('descricao') and 'pausado' in r.get('descricao').lower()) or
+                r.get('fase_atual') == 'Pausado'
+            ):
+                status = 'pausado'
+            
+            projetos.append({
+                'id': r['id'],
+                'nome': r['nome'],
+                'numero_contrato': r['numero_contrato'],
+                'gerente': r['gerente'] or 'Sem gerente',
+                'status': status
+            })
+        return projetos
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
