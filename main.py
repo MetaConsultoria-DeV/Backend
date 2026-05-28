@@ -975,13 +975,36 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
 
 
 @app.get('/api/dashboard/pape')
-async def get_dashboard_pape(projeto_id: int | None = None):
+async def get_dashboard_pape(
+    projeto_id: int | None = None,
+    data_inicio: str | None = None,
+    data_fim: str | None = None
+):
     try:
-        latest_filter = '''
+        sub_params = []
+        sub_date_filters = ""
+        if data_inicio:
+            sub_date_filters += " AND ap2.data_resposta >= %s"
+            sub_params.append(data_inicio)
+        if data_fim:
+            sub_date_filters += " AND ap2.data_resposta <= %s"
+            sub_params.append(data_fim)
+
+        outer_params = []
+        outer_date_filters = ""
+        if data_inicio:
+            outer_date_filters += " AND ap.data_resposta >= %s"
+            outer_params.append(data_inicio)
+        if data_fim:
+            outer_date_filters += " AND ap.data_resposta <= %s"
+            outer_params.append(data_fim)
+
+        latest_filter = f'''
         NOT EXISTS (
             SELECT 1
             FROM acompanhamento_projeto ap2
             WHERE ap2.projeto_externo_id = ap.projeto_externo_id
+              {sub_date_filters}
               AND (
                 ap2.data_resposta > ap.data_resposta
                 OR (ap2.data_resposta = ap.data_resposta AND ap2.id > ap.id)
@@ -989,34 +1012,34 @@ async def get_dashboard_pape(projeto_id: int | None = None):
         )
         '''
 
-        total_respostas_query = 'SELECT COUNT(*) as total FROM acompanhamento_projeto'
+        total_respostas_query = f'SELECT COUNT(*) as total FROM acompanhamento_projeto ap WHERE 1=1 {outer_date_filters}'
         total_projetos_query = f'''
         SELECT COUNT(*) as total
         FROM acompanhamento_projeto ap
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
         '''
         sat_query = f'''
         SELECT AVG(ap.satisfacao_cliente) as media
         FROM acompanhamento_projeto ap
         WHERE ap.satisfacao_cliente IS NOT NULL
-          AND {latest_filter}
+          AND {latest_filter} {outer_date_filters}
         '''
         met_query = f'''
         SELECT ap.modelo_gerenciamento, COUNT(*) as quantidade
         FROM acompanhamento_projeto ap
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
         GROUP BY ap.modelo_gerenciamento
         '''
         cron_query = f'''
         SELECT ap.status_cronograma, COUNT(*) as quantidade
         FROM acompanhamento_projeto ap
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
         GROUP BY ap.status_cronograma
         '''
         conclusao_query = f'''
         SELECT ap.pct_conclusao, COUNT(*) as quantidade
         FROM acompanhamento_projeto ap
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
         GROUP BY ap.pct_conclusao
         ORDER BY FIELD(ap.pct_conclusao, '0-20%', '21-40%', '41-60%', '61-80%', '81-100%')
         '''
@@ -1025,7 +1048,7 @@ async def get_dashboard_pape(projeto_id: int | None = None):
         FROM acompanhamento_projeto ap
         WHERE {latest_filter}
           AND ap.status_cronograma IN ('Com risco de atraso', 'Atrasado')
-          AND ap.motivos_atraso IS NOT NULL
+          AND ap.motivos_atraso IS NOT NULL {outer_date_filters}
         '''
         projetos_query = f'''
         SELECT
@@ -1056,7 +1079,7 @@ async def get_dashboard_pape(projeto_id: int | None = None):
             ), 'Sem coordenação') as coordenacao
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
         ORDER BY
             FIELD(ap.status_cronograma, 'Atrasado', 'Com risco de atraso', 'Dentro do prazo', 'Concluido'),
             ap.data_resposta DESC,
@@ -1080,7 +1103,7 @@ async def get_dashboard_pape(projeto_id: int | None = None):
             ), 'Sem coordenação') as coordenacao
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
         ORDER BY
             FIELD(ap.status_cronograma, 'Atrasado', 'Com risco de atraso', 'Dentro do prazo', 'Concluido'),
             pe.nome
@@ -1095,7 +1118,7 @@ async def get_dashboard_pape(projeto_id: int | None = None):
             ap.eficacia_metodologia
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
         ORDER BY pe.nome
         '''
         cliente_orientacao_query = f'''
@@ -1113,7 +1136,7 @@ async def get_dashboard_pape(projeto_id: int | None = None):
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
         LEFT JOIN acomp_orientador ao ON ao.acompanhamento_id = ap.id
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
         ORDER BY pe.nome
         '''
         agil_query = f'''
@@ -1143,14 +1166,14 @@ async def get_dashboard_pape(projeto_id: int | None = None):
             FROM acomp_impedimento
             GROUP BY acompanhamento_id
         ) imp ON imp.acompanhamento_id = ap.id
-        WHERE {latest_filter}
+        WHERE {latest_filter} {outer_date_filters}
           AND (
             ap.modelo_gerenciamento IN ('Ágil', 'Agil')
             OR acs.pct_story_points IS NOT NULL
           )
         ORDER BY ap.data_resposta DESC, pe.nome
         '''
-        detalhe_query = '''
+        detalhe_query = f'''
         SELECT
             ap.id,
             ap.projeto_externo_id as projeto_id,
@@ -1180,32 +1203,49 @@ async def get_dashboard_pape(projeto_id: int | None = None):
             ), 'Sem gerente') as gerente
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
+        WHERE 1=1 {outer_date_filters}
         ORDER BY pe.nome, ap.data_resposta, ap.id
         '''
 
         total_respostas_result = await asyncio.to_thread(
-            execute_query, total_respostas_query, fetch_one=True
+            execute_query, total_respostas_query, tuple(outer_params) if outer_params else None, fetch_one=True
         )
         total_projetos_result = await asyncio.to_thread(
-            execute_query, total_projetos_query, fetch_one=True
+            execute_query, total_projetos_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_one=True
         )
-        sat_result = await asyncio.to_thread(execute_query, sat_query, fetch_one=True)
-        met_result = await asyncio.to_thread(execute_query, met_query, fetch_all=True)
-        cron_result = await asyncio.to_thread(execute_query, cron_query, fetch_all=True)
+        sat_result = await asyncio.to_thread(
+            execute_query, sat_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_one=True
+        )
+        met_result = await asyncio.to_thread(
+            execute_query, met_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
+        )
+        cron_result = await asyncio.to_thread(
+            execute_query, cron_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
+        )
         conclusao_result = await asyncio.to_thread(
-            execute_query, conclusao_query, fetch_all=True
+            execute_query, conclusao_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
         )
-        motivos_rows = await asyncio.to_thread(execute_query, motivos_query, fetch_all=True)
-        projetos_atuais = await asyncio.to_thread(execute_query, projetos_query, fetch_all=True)
-        riscos_rows = await asyncio.to_thread(execute_query, riscos_query, fetch_all=True)
+        motivos_rows = await asyncio.to_thread(
+            execute_query, motivos_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
+        )
+        projetos_atuais = await asyncio.to_thread(
+            execute_query, projetos_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
+        )
+        riscos_rows = await asyncio.to_thread(
+            execute_query, riscos_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
+        )
         metodo_escopo_rows = await asyncio.to_thread(
-            execute_query, metodo_escopo_query, fetch_all=True
+            execute_query, metodo_escopo_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
         )
         cliente_orientacao_rows = await asyncio.to_thread(
-            execute_query, cliente_orientacao_query, fetch_all=True
+            execute_query, cliente_orientacao_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
         )
-        agil_rows = await asyncio.to_thread(execute_query, agil_query, fetch_all=True)
-        detalhe_rows = await asyncio.to_thread(execute_query, detalhe_query, fetch_all=True)
+        agil_rows = await asyncio.to_thread(
+            execute_query, agil_query, tuple(sub_params + outer_params) if (sub_params or outer_params) else None, fetch_all=True
+        )
+        detalhe_rows = await asyncio.to_thread(
+            execute_query, detalhe_query, tuple(outer_params) if outer_params else None, fetch_all=True
+        )
 
         total_respostas = total_respostas_result['total'] if total_respostas_result else 0
         total_projetos = total_projetos_result['total'] if total_projetos_result else 0
