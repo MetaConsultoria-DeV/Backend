@@ -26,6 +26,20 @@ class Coordenacao(BaseModel):
     nome: str
 
 
+class Servico(BaseModel):
+    id: int
+    nome: str
+    sigla: str
+
+
+class ServicosPorCoordenacao(BaseModel):
+    coordenacao_id: int
+    coordenacao_nome: str
+    coordenacao_sigla: str
+    servicos: list[Servico]
+
+
+
 class Membro(BaseModel):
     id: int
     nome: str

@@ -4,7 +4,7 @@ from datetime import datetime
 import asyncio
 import httpx
 import json
-from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem
+from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao
 from database import execute_query, execute_insert
 import os
 from dotenv import load_dotenv
@@ -878,6 +878,42 @@ async def get_coordenacoes():
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/api/servicos', response_model=list[ServicosPorCoordenacao])
+async def get_servicos():
+    query = '''
+    SELECT s.id, s.nome, s.sigla,
+           c.id as coordenacao_id, c.nome as coordenacao_nome, c.sigla as coordenacao_sigla
+    FROM servico s
+    JOIN coordenacao c ON c.id = s.coordenacao_id
+    ORDER BY c.nome, s.nome
+    '''
+    try:
+        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+        if not resultado:
+            return []
+        grupos = {}
+        for r in resultado:
+            cid = r['coordenacao_id']
+            if cid not in grupos:
+                grupos[cid] = {
+                    'coordenacao_id': cid,
+                    'coordenacao_nome': r['coordenacao_nome'],
+                    'coordenacao_sigla': r['coordenacao_sigla'],
+                    'servicos': []
+                }
+            grupos[cid]['servicos'].append({
+                'id': r['id'],
+                'nome': r['nome'],
+                'sigla': r['sigla']
+            })
+        return list(grupos.values())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get('/api/membros', response_model=list[Membro])
