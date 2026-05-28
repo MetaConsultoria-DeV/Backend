@@ -107,3 +107,14 @@ class PapeFormData(BaseModel):
 
     # Orçamento
     suficiencia_orcamento: Optional[Literal[1, 2, 3, 4, 5, 'Não necessitou']] = None
+
+
+class ProjetoUpdate(BaseModel):
+    nome: str
+    descricao_projeto: Optional[str] = None
+    data_inicio: Optional[str] = None
+    numero_contrato: Optional[str] = None
+    valor_total: Optional[float] = None
+    possui_orientador: Optional[int] = None
+    nome_orientador: Optional[str] = None
+

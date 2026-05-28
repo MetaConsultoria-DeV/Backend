@@ -4,7 +4,7 @@ from datetime import datetime
 import asyncio
 import httpx
 import json
-from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao
+from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao, ProjetoUpdate
 from database import execute_query, execute_insert
 import os
 from dotenv import load_dotenv
@@ -905,6 +905,72 @@ async def get_projeto_detalhes(projeto_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put('/api/projetos/{projeto_id}')
+async def update_projeto(projeto_id: int, data: ProjetoUpdate):
+    try:
+        check_query = 'SELECT id FROM projeto_externo WHERE id = %s'
+        exists = await asyncio.to_thread(execute_query, check_query, (projeto_id,), fetch_one=True)
+        if not exists:
+            raise HTTPException(status_code=404, detail='Projeto não encontrado')
+
+        update_pe_query = '''
+        UPDATE projeto_externo
+        SET nome = %s,
+            descricao_projeto = %s,
+            data_inicio = %s,
+            possui_orientador = %s,
+            nome_orientador = %s
+        WHERE id = %s
+        '''
+        data_inicio = data.data_inicio if data.data_inicio else None
+        nome_orientador = data.nome_orientador if data.possui_orientador == 1 else None
+
+        await asyncio.to_thread(
+            execute_query,
+            update_pe_query,
+            (data.nome, data.descricao_projeto, data_inicio, data.possui_orientador, nome_orientador, projeto_id)
+        )
+
+        contract_query = 'SELECT id FROM contrato WHERE projeto_externo_id = %s'
+        contract = await asyncio.to_thread(execute_query, contract_query, (projeto_id,), fetch_one=True)
+
+        if contract:
+            update_c_query = '''
+            UPDATE contrato
+            SET numero = %s,
+                valor_total = %s
+            WHERE projeto_externo_id = %s
+            '''
+            await asyncio.to_thread(
+                execute_query,
+                update_c_query,
+                (data.numero_contrato or '', data.valor_total or 0.0, projeto_id)
+            )
+        elif data.numero_contrato or data.valor_total:
+            client_query = 'SELECT id FROM cliente LIMIT 1'
+            client = await asyncio.to_thread(execute_query, client_query, fetch_one=True)
+            client_id = client['id'] if client else 1
+
+            insert_c_query = '''
+            INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total)
+            VALUES (%s, %s, %s, %s)
+            '''
+            await asyncio.to_thread(
+                execute_query,
+                insert_c_query,
+                (client_id, projeto_id, data.numero_contrato or '', data.valor_total or 0.0)
+            )
+
+        return {'success': True, 'message': 'Projeto atualizado com sucesso'}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 
 
 @app.get('/api/coordenacoes', response_model=list[Coordenacao])

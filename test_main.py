@@ -618,5 +618,68 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response['datas_disponiveis'], ['2026-05-30', '2026-05-15'])
 
 
+class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+        self.client = TestClient(self.main.app)
+
+    async def test_update_projeto_not_found(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=None) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = self.client.put('/api/projetos/999', json={
+                'nome': 'Projeto Teste',
+                'descricao_projeto': 'Desc',
+                'data_inicio': '2026-05-01',
+                'numero_contrato': '123',
+                'valor_total': 1500.0,
+                'possui_orientador': 0,
+                'nome_orientador': None
+            })
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['detail'], 'Projeto não encontrado')
+
+    async def test_update_projeto_success_updates_contract(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        mock_returns = [
+            {'id': 10},
+            1,
+            {'id': 5},
+            1
+        ]
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=mock_returns) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = self.client.put('/api/projetos/10', json={
+                'nome': 'Projeto Editado',
+                'descricao_projeto': 'Desc Editada',
+                'data_inicio': '2026-05-01',
+                'numero_contrato': '123-ABC',
+                'valor_total': 25000.0,
+                'possui_orientador': 1,
+                'nome_orientador': 'Orientador Teste'
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'success': True, 'message': 'Projeto atualizado com sucesso'})
+        
+        self.assertEqual(execute_query.call_count, 4)
+        queries = [call.args[0] for call in execute_query.call_args_list]
+        self.assertIn('SELECT id FROM projeto_externo', queries[0])
+        self.assertIn('UPDATE projeto_externo', queries[1])
+        self.assertIn('SELECT id FROM contrato', queries[2])
+        self.assertIn('UPDATE contrato', queries[3])
+
+
 if __name__ == '__main__':
     unittest.main()
+
