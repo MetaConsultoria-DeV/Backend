@@ -46,6 +46,14 @@ class Membro(BaseModel):
     email: str
 
 
+class MembrosPorCoordenacao(BaseModel):
+    coordenacao_id: int
+    coordenacao_nome: str
+    coordenacao_sigla: str
+    membros: list[Membro]
+
+
+
 class PapeFormData(BaseModel):
     # Identificação
     respondente_nome: str

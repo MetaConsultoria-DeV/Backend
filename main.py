@@ -4,7 +4,7 @@ from datetime import datetime
 import asyncio
 import httpx
 import json
-from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao
+from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao
 from database import execute_query, execute_insert
 import os
 from dotenv import load_dotenv
@@ -934,6 +934,56 @@ async def get_membros():
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/api/membros-por-coordenacao', response_model=list[MembrosPorCoordenacao])
+async def get_membros_por_coordenacao():
+    query = '''
+    SELECT m.id, m.nome, m.email,
+           c.id as coordenacao_id, c.nome as coordenacao_nome, c.sigla as coordenacao_sigla
+    FROM membro m
+    LEFT JOIN membro_coordenacao mc ON mc.membro_id = m.id
+    LEFT JOIN coordenacao c ON c.id = mc.coordenacao_id
+    ORDER BY c.nome, m.nome
+    '''
+    try:
+        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+        grupos = {}
+        
+        # Grupo inicial para membros sem coordenação cadastrada
+        grupos[0] = {
+            'coordenacao_id': 0,
+            'coordenacao_nome': 'Outros Departamentos / Presidência',
+            'coordenacao_sigla': 'OUTROS',
+            'membros': []
+        }
+        
+        for r in resultado:
+            membro_data = {'id': r['id'], 'nome': r['nome'], 'email': r['email']}
+            if r['coordenacao_id'] is not None:
+                cid = r['coordenacao_id']
+                if cid not in grupos:
+                    grupos[cid] = {
+                        'coordenacao_id': cid,
+                        'coordenacao_nome': r['coordenacao_nome'],
+                        'coordenacao_sigla': r['coordenacao_sigla'],
+                        'membros': []
+                    }
+                if membro_data not in grupos[cid]['membros']:
+                    grupos[cid]['membros'].append(membro_data)
+            else:
+                if membro_data not in grupos[0]['membros']:
+                    grupos[0]['membros'].append(membro_data)
+                    
+        if not grupos[0]['membros']:
+            del grupos[0]
+            
+        return list(grupos.values())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 async def send_to_n8n(data: dict):

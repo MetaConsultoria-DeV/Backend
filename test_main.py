@@ -41,6 +41,55 @@ class MembrosEndpointTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response, expected_rows)
 
 
+class MembrosPorCoordenacaoEndpointTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    async def test_get_membros_por_coordenacao_groups_properly(self):
+        expected_rows = [
+            {
+                'id': 1,
+                'nome': 'Ana Silva',
+                'email': 'ana@example.com',
+                'coordenacao_id': 2,
+                'coordenacao_nome': 'Tecnologia e Desenvolvimento',
+                'coordenacao_sigla': 'TD',
+            },
+            {
+                'id': 2,
+                'nome': 'Bruno Souza',
+                'email': 'bruno@example.com',
+                'coordenacao_id': None,
+                'coordenacao_nome': None,
+                'coordenacao_sigla': None,
+            },
+        ]
+
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=expected_rows) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = await self.main.get_membros_por_coordenacao()
+
+        query = execute_query.call_args.args[0]
+        self.assertIn('FROM membro m', query)
+        self.assertIn('LEFT JOIN membro_coordenacao mc ON mc.membro_id = m.id', query)
+        self.assertIn('LEFT JOIN coordenacao c ON c.id = mc.coordenacao_id', query)
+        
+        self.assertEqual(len(response), 2)
+        group_td = next(g for g in response if g['coordenacao_id'] == 2)
+        group_outros = next(g for g in response if g['coordenacao_id'] == 0)
+
+        self.assertEqual(group_td['coordenacao_sigla'], 'TD')
+        self.assertEqual(group_td['membros'][0]['nome'], 'Ana Silva')
+
+        self.assertEqual(group_outros['coordenacao_sigla'], 'OUTROS')
+        self.assertEqual(group_outros['membros'][0]['nome'], 'Bruno Souza')
+
+
 class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.main = import_main_without_database()
