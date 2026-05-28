@@ -1246,6 +1246,10 @@ async def get_dashboard_pape(
         detalhe_rows = await asyncio.to_thread(
             execute_query, detalhe_query, tuple(outer_params) if outer_params else None, fetch_all=True
         )
+        datas_disponiveis_query = 'SELECT DISTINCT data_resposta FROM acompanhamento_projeto ORDER BY data_resposta DESC'
+        datas_disponiveis_result = await asyncio.to_thread(
+            execute_query, datas_disponiveis_query, fetch_all=True
+        )
 
         total_respostas = total_respostas_result['total'] if total_respostas_result else 0
         total_projetos = total_projetos_result['total'] if total_projetos_result else 0
@@ -1253,6 +1257,11 @@ async def get_dashboard_pape(
         metodologias = {row['modelo_gerenciamento']: row['quantidade'] for row in met_result} if met_result else {}
         cronograma = {row['status_cronograma']: row['quantidade'] for row in cron_result} if cron_result else {}
         conclusao = {row['pct_conclusao']: row['quantidade'] for row in conclusao_result} if conclusao_result else {}
+        datas_disponiveis = [
+            str(row['data_resposta'])
+            for row in datas_disponiveis_result
+            if row.get('data_resposta')
+        ] if datas_disponiveis_result else []
 
         return {
             'total_projetos': total_projetos,
@@ -1268,6 +1277,7 @@ async def get_dashboard_pape(
             'cliente_orientacao': build_cliente_orientacao_dashboard(cliente_orientacao_rows or []),
             'agil': build_agil_dashboard(agil_rows or []),
             'detalhe': build_detalhe_dashboard(detalhe_rows or [], projeto_id),
+            'datas_disponiveis': datas_disponiveis,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

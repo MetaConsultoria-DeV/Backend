@@ -537,6 +537,10 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
                     'one_on_one_pmo': 'Sim',
                 }
             ],
+            [
+                {'data_resposta': '2026-05-30'},
+                {'data_resposta': '2026-05-15'},
+            ],
         ]
 
         async def run_sync(func, *args, **kwargs):
@@ -562,6 +566,7 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response['cliente_orientacao']['quantidade_orientadores'], 1)
         self.assertEqual(response['agil']['resumo']['solicitacoes_1_1'], 1)
         self.assertEqual(response['detalhe']['projeto_foco']['projeto'], 'Protege Católica')
+        self.assertEqual(response['datas_disponiveis'], ['2026-05-30', '2026-05-15'])
 
 
 if __name__ == '__main__':
