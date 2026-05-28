@@ -474,7 +474,10 @@ def build_cliente_orientacao_dashboard(rows: list[dict]) -> dict:
             'disponibilidade': sorted(orientador_disponibilidade, key=lambda item: item['value'], reverse=True),
         },
         'impactos': impactos,
-        'pontos_atencao': sorted(pontos_atencao, key=lambda item: item['nota']),
+        'pontos_atencao': sorted(
+            pontos_atencao,
+            key=lambda item: (item['indicador'], item['nota'], item['projeto']),
+        ),
         'quantidade_orientadores': len(orientadores),
         'projetos_com_orientacao_pct': projetos_com_orientacao_pct,
         'medias': {

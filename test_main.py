@@ -350,6 +350,7 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['projetos_com_orientacao_pct'], 66.7)
         self.assertEqual(result['orientadores']['efetividade'][0], {'name': 'Cristiano Saad', 'value': 5.0})
         self.assertEqual(result['pontos_atencao'][0]['projeto'], 'Miller P(AI)')
+        self.assertEqual(result['pontos_atencao'][0]['indicador'], 'Comunicação efetiva')
 
     def test_build_agil_dashboard_groups_story_points_and_impediments(self):
         rows = [
