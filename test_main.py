@@ -299,8 +299,8 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['variacao_escopo'][0], {'name': 'FEMEA no Mar', 'value': 1})
         self.assertEqual(result['eficacia_metodologia'][0], {'name': 'Miller P(AI)', 'value': 1})
         self.assertEqual(result['medias']['variacao_escopo'], 2.5)
-        self.assertEqual(result['pontos_atencao'][0]['projeto'], 'Miller P(AI)')
-        self.assertEqual(result['pontos_atencao'][0]['indicador'], 'Eficácia da metodologia')
+        self.assertEqual(result['pontos_atencao'][0]['projeto'], 'FEMEA no Mar')
+        self.assertEqual(result['pontos_atencao'][0]['indicador'], 'Capacitação da equipe')
 
     def test_build_cliente_orientacao_dashboard_aggregates_client_and_advisor_scores(self):
         rows = [

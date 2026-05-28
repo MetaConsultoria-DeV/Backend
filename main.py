@@ -359,7 +359,7 @@ def build_metodo_escopo_dashboard(rows: list[dict]) -> dict:
         'eficacia_metodologia': sorted(series['eficacia_metodologia'], key=lambda item: (item['value'], item['name'])),
         'pontos_atencao': sorted(
             pontos_atencao,
-            key=lambda item: item['nota'],
+            key=lambda item: (item['indicador'], item['nota'], item['projeto']),
         ),
         'medias': medias,
     }
