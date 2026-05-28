@@ -228,7 +228,7 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
             [
                 {'name': 'Comunicação com cliente', 'value': 2},
                 {'name': 'Capacidade técnica', 'value': 1},
-                {'name': 'Falta de recursos', 'value': 1},
+                {'name': 'Falta de recursos (Ex: Ferramentas, orçamento...)', 'value': 1},
             ],
         )
 
@@ -256,9 +256,11 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
 
         result = self.main.build_riscos_dashboard(rows)
 
-        self.assertEqual(result['motivos_por_coordenacao'][0]['motivo'], 'Comunicação com cliente')
-        self.assertEqual(result['motivos_por_coordenacao'][0]['total'], 3)
-        self.assertEqual(result['motivos_por_coordenacao'][0]['coordenacoes']['Gestão de Negócios'], 2)
+        self.assertEqual(result['motivos_por_coordenacao'][0]['motivo'], 'Capacidade técnica')
+        self.assertEqual(result['motivos_por_coordenacao'][0]['total'], 1)
+        self.assertEqual(result['motivos_por_coordenacao'][1]['motivo'], 'Comunicação com cliente')
+        self.assertEqual(result['motivos_por_coordenacao'][1]['total'], 3)
+        self.assertEqual(result['motivos_por_coordenacao'][1]['coordenacoes']['Gestão de Negócios'], 2)
         self.assertEqual(len(result['projetos_em_risco']), 2)
         self.assertEqual(result['suficiencia_orcamento'][0], {'name': 'AM do Amor', 'value': 2})
         self.assertEqual(result['comunicacao_cliente'][0], {'name': 'Valida Bruninho', 'value': 2})

@@ -134,7 +134,7 @@ def parse_motivos_atraso(raw_motivos) -> list[str]:
     cleaned = []
     for motivo in parsed_motivos:
         if motivo:
-            motivo_str = str(motivo)
+            motivo_str = str(motivo).strip()
             replacements = {
                 'u00e7': 'ç',
                 'u00e3': 'ã',
@@ -159,6 +159,25 @@ def parse_motivos_atraso(raw_motivos) -> list[str]:
             }
             for search, replace in replacements.items():
                 motivo_str = motivo_str.replace(search, replace)
+            
+            # Map variations to canonical reasons
+            norm_mapping = {
+                "Escopo mal definido": "Indefinição e(ou) fuga de escopo",
+                "Mudança de requisitos": "Indefinição e(ou) fuga de escopo",
+                "Indefinição e(ou) fuga de escopo": "Indefinição e(ou) fuga de escopo",
+                
+                "Falta de recurso": "Falta de recursos (Ex: Ferramentas, orçamento...)",
+                "Falta de recursos": "Falta de recursos (Ex: Ferramentas, orçamento...)",
+                "Falta de recursos (Ex.: Ferramentas, orçamento...)": "Falta de recursos (Ex: Ferramentas, orçamento...)",
+                "Falta de recursos (Ex: Ferramentas, orçamento...)": "Falta de recursos (Ex: Ferramentas, orçamento...)",
+                
+                "Cliente lento": "Comunicação com cliente",
+                "Comunicação com cliente": "Comunicação com cliente",
+                
+                "Problemas com equipe": "Problemas com equipe",
+                "Capacidade técnica": "Capacidade técnica"
+            }
+            motivo_str = norm_mapping.get(motivo_str, motivo_str)
             cleaned.append(motivo_str)
 
     return cleaned
@@ -178,7 +197,28 @@ def count_motivos_atraso(rows: list[dict]) -> list[dict]:
 
 
 def build_riscos_dashboard(rows: list[dict]) -> dict:
-    motivos_por_coordenacao: dict[str, dict[str, int]] = {}
+    CANONICAL_MOTIVOS = [
+        "Capacidade técnica",
+        "Comunicação com cliente",
+        "Falta de recursos (Ex: Ferramentas, orçamento...)",
+        "Indefinição e(ou) fuga de escopo",
+        "Problemas com equipe"
+    ]
+    
+    CANONICAL_COORDENACOES = [
+        "Construção e Energia",
+        "Desenvolvimento de Máquinas",
+        "Gestão de Negócios",
+        "Otimização de Processos",
+        "Tecnologia e Desenvolvimento"
+    ]
+
+    # Initialize the grid with 0 for all canonical reasons and canonical coordinations
+    motivos_por_coordenacao = {
+        motivo: {coord: 0 for coord in CANONICAL_COORDENACOES}
+        for motivo in CANONICAL_MOTIVOS
+    }
+
     projetos_em_risco: list[dict] = []
     suficiencia_orcamento: list[dict] = []
     comunicacao_cliente: list[dict] = []
@@ -201,12 +241,17 @@ def build_riscos_dashboard(rows: list[dict]) -> dict:
             })
 
             for motivo in motivos:
+                # If there's an unknown motive (like 'Outro'), skip it or add it dynamically
                 if motivo not in motivos_por_coordenacao:
-                    motivos_por_coordenacao[motivo] = {}
+                    if motivo and motivo not in ('Outro', ''):
+                        motivos_por_coordenacao[motivo] = {coord: 0 for coord in CANONICAL_COORDENACOES}
+                    else:
+                        continue
+                
                 for coordenacao in coordenacoes or ['Sem coordenação']:
-                    motivos_por_coordenacao[motivo][coordenacao] = (
-                        motivos_por_coordenacao[motivo].get(coordenacao, 0) + 1
-                    )
+                    if coordenacao not in motivos_por_coordenacao[motivo]:
+                        motivos_por_coordenacao[motivo][coordenacao] = 0
+                    motivos_por_coordenacao[motivo][coordenacao] += 1
 
         if row.get('suficiencia_orcamento') is not None:
             suficiencia_orcamento.append({
@@ -227,20 +272,22 @@ def build_riscos_dashboard(rows: list[dict]) -> dict:
             })
 
     matriz_motivos = []
-    for motivo, coordenacoes in motivos_por_coordenacao.items():
-        total = sum(coordenacoes.values())
+    # Pre-ordered keys: canonical first
+    ordered_keys = CANONICAL_MOTIVOS + [k for k in motivos_por_coordenacao if k not in CANONICAL_MOTIVOS]
+    
+    for motivo in ordered_keys:
+        if motivo not in motivos_por_coordenacao:
+            continue
+        coordenacoes_counts = motivos_por_coordenacao[motivo]
+        total = sum(coordenacoes_counts.values())
         matriz_motivos.append({
             'motivo': motivo,
             'total': total,
-            'coordenacoes': dict(sorted(coordenacoes.items())),
+            'coordenacoes': coordenacoes_counts,
         })
 
     return {
-        'motivos_por_coordenacao': sorted(
-            matriz_motivos,
-            key=lambda item: item['total'],
-            reverse=True,
-        ),
+        'motivos_por_coordenacao': matriz_motivos,
         'projetos_em_risco': projetos_em_risco,
         'suficiencia_orcamento': sorted(suficiencia_orcamento, key=lambda item: item['value']),
         'comunicacao_cliente': sorted(comunicacao_cliente, key=lambda item: item['value']),
