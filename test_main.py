@@ -680,6 +680,63 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('UPDATE contrato', queries[3])
 
 
+
+
+class DeleteProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+        self.client = TestClient(self.main.app)
+
+    async def test_delete_projeto_wrong_password_returns_403(self):
+        response = self.client.delete('/api/projetos/10?senha=senhaErrada')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['detail'], 'Senha incorreta. A exclusão não foi autorizada.')
+
+    async def test_delete_projeto_not_found_returns_404(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=None),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = self.client.delete('/api/projetos/999?senha=ProjetosDib')
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['detail'], 'Projeto não encontrado')
+
+    async def test_delete_projeto_success(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        # Retorna o projeto existente na verificação inicial, None nas demais
+        call_returns = [{'id': 10}] + [None] * 10
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=call_returns) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = self.client.delete('/api/projetos/10?senha=ProjetosDib')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'success': True, 'message': 'Projeto excluído com sucesso'})
+
+        # Verifica que foram feitas 9 chamadas ao banco:
+        # 1 check + 2 UPDATEs transacao + 6 DELETEs + 1 DELETE projeto_externo
+        self.assertEqual(execute_query.call_count, 9)
+
+        queries = [call.args[0].strip() for call in execute_query.call_args_list]
+        self.assertIn('SELECT id FROM projeto_externo WHERE id = %s', queries[0])
+        self.assertIn('UPDATE transacao', queries[1])
+        self.assertIn('UPDATE transacao SET projeto_externo_id = NULL', queries[2])
+        self.assertIn('DELETE FROM contrato_pagamento', queries[3])
+        self.assertIn('DELETE FROM acompanhamento_projeto', queries[4])
+        self.assertIn('DELETE FROM membro_projeto', queries[5])
+        self.assertIn('DELETE FROM projeto_servico', queries[6])
+        self.assertIn('DELETE FROM contrato', queries[7])
+        self.assertIn('DELETE FROM projeto_externo', queries[8])
+
+
 if __name__ == '__main__':
     unittest.main()
 

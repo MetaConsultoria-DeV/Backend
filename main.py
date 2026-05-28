@@ -965,6 +965,89 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+DELETE_PASSWORD = 'ProjetosDib'
+
+
+@app.delete('/api/projetos/{projeto_id}')
+async def delete_projeto(projeto_id: int, senha: str):
+    if senha != DELETE_PASSWORD:
+        raise HTTPException(status_code=403, detail='Senha incorreta. A exclusão não foi autorizada.')
+
+    try:
+        check_query = 'SELECT id FROM projeto_externo WHERE id = %s'
+        exists = await asyncio.to_thread(execute_query, check_query, (projeto_id,), fetch_one=True)
+        if not exists:
+            raise HTTPException(status_code=404, detail='Projeto não encontrado')
+
+        # 1. Desvincular transações financeiras dos pagamentos do contrato deste projeto
+        #    (preserva o histórico financeiro, apenas remove o vínculo)
+        await asyncio.to_thread(
+            execute_query,
+            '''
+            UPDATE transacao
+            SET contrato_pagamento_id = NULL
+            WHERE contrato_pagamento_id IN (
+                SELECT id FROM contrato_pagamento WHERE projeto_externo_id = %s
+            )
+            ''',
+            (projeto_id,),
+        )
+
+        # 2. Desvincular transações diretamente ligadas ao projeto
+        await asyncio.to_thread(
+            execute_query,
+            'UPDATE transacao SET projeto_externo_id = NULL WHERE projeto_externo_id = %s',
+            (projeto_id,),
+        )
+
+        # 3. Remover parcelas de pagamento do contrato
+        await asyncio.to_thread(
+            execute_query,
+            'DELETE FROM contrato_pagamento WHERE projeto_externo_id = %s',
+            (projeto_id,),
+        )
+
+        # 4. Remover acompanhamentos (cascade automático: acomp_impedimento, acomp_orientador, acomp_sprint)
+        await asyncio.to_thread(
+            execute_query,
+            'DELETE FROM acompanhamento_projeto WHERE projeto_externo_id = %s',
+            (projeto_id,),
+        )
+
+        # 5. Remover membros da equipe
+        await asyncio.to_thread(
+            execute_query,
+            'DELETE FROM membro_projeto WHERE projeto_externo_id = %s',
+            (projeto_id,),
+        )
+
+        # 6. Remover serviços vinculados
+        await asyncio.to_thread(
+            execute_query,
+            'DELETE FROM projeto_servico WHERE projeto_externo_id = %s',
+            (projeto_id,),
+        )
+
+        # 7. Remover contrato
+        await asyncio.to_thread(
+            execute_query,
+            'DELETE FROM contrato WHERE projeto_externo_id = %s',
+            (projeto_id,),
+        )
+
+        # 8. Remover o projeto
+        await asyncio.to_thread(
+            execute_query,
+            'DELETE FROM projeto_externo WHERE id = %s',
+            (projeto_id,),
+        )
+
+        return {'success': True, 'message': 'Projeto excluído com sucesso'}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
