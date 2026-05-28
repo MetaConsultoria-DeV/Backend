@@ -131,7 +131,37 @@ def parse_motivos_atraso(raw_motivos) -> list[str]:
     if isinstance(parsed_motivos, str):
         parsed_motivos = [parsed_motivos]
 
-    return [str(motivo) for motivo in parsed_motivos if motivo]
+    cleaned = []
+    for motivo in parsed_motivos:
+        if motivo:
+            motivo_str = str(motivo)
+            replacements = {
+                'u00e7': 'ç',
+                'u00e3': 'ã',
+                'u00e9': 'é',
+                'u00ed': 'í',
+                'u00f3': 'ó',
+                'u00ea': 'ê',
+                'u00e2': 'â',
+                'u00e0': 'à',
+                'u00fa': 'ú',
+                'u00e1': 'á',
+                'u00c7': 'Ç',
+                'u00c3': 'Ã',
+                'u00c9': 'É',
+                'u00cd': 'Í',
+                'u00d3': 'Ó',
+                'u00ca': 'Ê',
+                'u00c2': 'Â',
+                'u00c0': 'À',
+                'u00da': 'Ú',
+                'u00c1': 'Á',
+            }
+            for search, replace in replacements.items():
+                motivo_str = motivo_str.replace(search, replace)
+            cleaned.append(motivo_str)
+
+    return cleaned
 
 
 def count_motivos_atraso(rows: list[dict]) -> list[dict]:
