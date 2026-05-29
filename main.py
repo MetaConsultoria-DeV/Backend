@@ -1,15 +1,22 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import asyncio
 import httpx
 import json
+import secrets
 from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao, ProjetoUpdate, ProjetoCreate
-from database import execute_query, execute_insert
+from database import execute_query, execute_insert, transaction
+
 import os
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('pape')
+
 
 app = FastAPI(title='PAPE API', version='1.0.0')
 
@@ -23,6 +30,18 @@ app.add_middleware(
 )
 
 N8N_WEBHOOK_URL = os.getenv('N8N_WEBHOOK_URL', 'http://localhost:5678/webhook/pape')
+ADMIN_API_TOKEN = os.getenv('ADMIN_API_TOKEN', '')
+
+
+def require_admin_token(authorization: str | None = Header(default=None)) -> None:
+    """Exige 'Authorization: Bearer <ADMIN_API_TOKEN>'. Usado nas rotas de escrita."""
+    if not ADMIN_API_TOKEN:
+        raise HTTPException(status_code=503, detail='Servidor sem ADMIN_API_TOKEN configurado')
+    prefix = 'Bearer '
+    provided = authorization[len(prefix):] if authorization and authorization.startswith(prefix) else ''
+    if not provided or not secrets.compare_digest(provided, ADMIN_API_TOKEN):
+        raise HTTPException(status_code=401, detail='Não autorizado')
+
 
 
 @app.get('/api/health')
@@ -72,8 +91,9 @@ async def get_projetos(gerente_id: int | None = None):
         return resultado or []
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 @app.get('/api/projetos/all', response_model=list[ProjetoListItem])
@@ -137,8 +157,9 @@ async def get_all_projetos():
                 'status': status
             })
         return projetos
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 async def validate_project_manager(respondente_nome: str, projeto_externo_id: int) -> bool:
@@ -898,12 +919,13 @@ async def get_projeto_detalhes(projeto_id: int):
         return projeto
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 @app.put('/api/projetos/{projeto_id}')
-async def update_projeto(projeto_id: int, data: ProjetoUpdate):
+async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Depends(require_admin_token)):
     try:
         check_query = 'SELECT id FROM projeto_externo WHERE id = %s'
         exists = await asyncio.to_thread(execute_query, check_query, (projeto_id,), fetch_one=True)
@@ -961,93 +983,47 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate):
         return {'success': True, 'message': 'Projeto atualizado com sucesso'}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
-DELETE_PASSWORD = 'ProjetosDib'
+
+def _delete_projeto_tx(projeto_id: int) -> bool:
+    """Apaga o projeto e todas as dependências numa única transação. Retorna False se não existe."""
+    with transaction() as conn:
+        cur = conn.cursor()
+        cur.execute('SELECT id FROM projeto_externo WHERE id = %s', (projeto_id,))
+        if not cur.fetchone():
+            return False
+        cur.execute(
+            '''UPDATE transacao SET contrato_pagamento_id = NULL
+               WHERE contrato_pagamento_id IN (
+                   SELECT id FROM contrato_pagamento WHERE projeto_externo_id = %s)''',
+            (projeto_id,),
+        )
+        cur.execute('UPDATE transacao SET projeto_externo_id = NULL WHERE projeto_externo_id = %s', (projeto_id,))
+        cur.execute('DELETE FROM contrato_pagamento WHERE projeto_externo_id = %s', (projeto_id,))
+        cur.execute('DELETE FROM acompanhamento_projeto WHERE projeto_externo_id = %s', (projeto_id,))
+        cur.execute('DELETE FROM membro_projeto WHERE projeto_externo_id = %s', (projeto_id,))
+        cur.execute('DELETE FROM projeto_servico WHERE projeto_externo_id = %s', (projeto_id,))
+        cur.execute('DELETE FROM contrato WHERE projeto_externo_id = %s', (projeto_id,))
+        cur.execute('DELETE FROM projeto_externo WHERE id = %s', (projeto_id,))
+        return True
 
 
 @app.delete('/api/projetos/{projeto_id}')
-async def delete_projeto(projeto_id: int, senha: str):
-    if senha != DELETE_PASSWORD:
-        raise HTTPException(status_code=403, detail='Senha incorreta. A exclusão não foi autorizada.')
-
+async def delete_projeto(projeto_id: int, _auth: None = Depends(require_admin_token)):
     try:
-        check_query = 'SELECT id FROM projeto_externo WHERE id = %s'
-        exists = await asyncio.to_thread(execute_query, check_query, (projeto_id,), fetch_one=True)
-        if not exists:
+        existe = await asyncio.to_thread(_delete_projeto_tx, projeto_id)
+        if not existe:
             raise HTTPException(status_code=404, detail='Projeto não encontrado')
-
-        # 1. Desvincular transações financeiras dos pagamentos do contrato deste projeto
-        #    (preserva o histórico financeiro, apenas remove o vínculo)
-        await asyncio.to_thread(
-            execute_query,
-            '''
-            UPDATE transacao
-            SET contrato_pagamento_id = NULL
-            WHERE contrato_pagamento_id IN (
-                SELECT id FROM contrato_pagamento WHERE projeto_externo_id = %s
-            )
-            ''',
-            (projeto_id,),
-        )
-
-        # 2. Desvincular transações diretamente ligadas ao projeto
-        await asyncio.to_thread(
-            execute_query,
-            'UPDATE transacao SET projeto_externo_id = NULL WHERE projeto_externo_id = %s',
-            (projeto_id,),
-        )
-
-        # 3. Remover parcelas de pagamento do contrato
-        await asyncio.to_thread(
-            execute_query,
-            'DELETE FROM contrato_pagamento WHERE projeto_externo_id = %s',
-            (projeto_id,),
-        )
-
-        # 4. Remover acompanhamentos (cascade automático: acomp_impedimento, acomp_orientador, acomp_sprint)
-        await asyncio.to_thread(
-            execute_query,
-            'DELETE FROM acompanhamento_projeto WHERE projeto_externo_id = %s',
-            (projeto_id,),
-        )
-
-        # 5. Remover membros da equipe
-        await asyncio.to_thread(
-            execute_query,
-            'DELETE FROM membro_projeto WHERE projeto_externo_id = %s',
-            (projeto_id,),
-        )
-
-        # 6. Remover serviços vinculados
-        await asyncio.to_thread(
-            execute_query,
-            'DELETE FROM projeto_servico WHERE projeto_externo_id = %s',
-            (projeto_id,),
-        )
-
-        # 7. Remover contrato
-        await asyncio.to_thread(
-            execute_query,
-            'DELETE FROM contrato WHERE projeto_externo_id = %s',
-            (projeto_id,),
-        )
-
-        # 8. Remover o projeto
-        await asyncio.to_thread(
-            execute_query,
-            'DELETE FROM projeto_externo WHERE id = %s',
-            (projeto_id,),
-        )
-
         return {'success': True, 'message': 'Projeto excluído com sucesso'}
-
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro ao excluir projeto')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 
@@ -1059,8 +1035,9 @@ async def get_coordenacoes():
         return resultado or []
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 @app.get('/api/servicos', response_model=list[ServicosPorCoordenacao])
@@ -1094,8 +1071,9 @@ async def get_servicos():
         return list(grupos.values())
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 
@@ -1115,8 +1093,9 @@ async def get_membros():
         return resultado or []
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 @app.get('/api/membros-por-coordenacao', response_model=list[MembrosPorCoordenacao])
@@ -1164,8 +1143,9 @@ async def get_membros_por_coordenacao():
         return list(grupos.values())
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 
@@ -1173,8 +1153,74 @@ async def send_to_n8n(data: dict):
     try:
         async with httpx.AsyncClient() as client:
             await client.post(N8N_WEBHOOK_URL, json=data, timeout=30.0)
-    except Exception as e:
-        print(f'Erro ao enviar para n8n: {e}')
+    except Exception:
+        logger.exception('Erro ao enviar para n8n')
+
+
+def _submit_pape_tx(data: PapeFormData) -> int:
+    motivos_str = json.dumps(data.motivos_atraso) if data.motivos_atraso else None
+    orcamento_nao_necessario = 1 if data.suficiencia_orcamento == 'Não necessitou' else 0
+    suficiencia_nota = (
+        int(data.suficiencia_orcamento)
+        if data.suficiencia_orcamento and data.suficiencia_orcamento != 'Não necessitou'
+        else None
+    )
+    dados_iniciais = {
+        'descricao_projeto': data.descricao_projeto, 'data_inicio': data.data_inicio,
+        'numero_contrato': data.numero_contrato, 'valor_projeto': data.valor_projeto,
+        'servicos_projeto': data.servicos_projeto, 'coordenacoes': data.coordenacoes,
+    }
+    dados_iniciais_str = json.dumps(dados_iniciais) if any(dados_iniciais.values()) else None
+
+    with transaction() as conn:
+        cur = conn.cursor(dictionary=True)
+        # contrato_id é opcional: NULL quando o projeto não tem contrato
+        cur.execute(
+            'SELECT id AS contrato_id FROM contrato WHERE projeto_externo_id = %s LIMIT 1',
+            (data.projeto_externo_id,),
+        )
+        row = cur.fetchone()
+        contrato_id = row['contrato_id'] if row else None
+
+        cur.execute(
+            '''INSERT INTO acompanhamento_projeto (
+                projeto_externo_id, contrato_id, data_resposta, modelo_gerenciamento,
+                pct_conclusao, status_cronograma, motivos_atraso,
+                capacitacao_equipe, eficacia_metodologia, nivel_retrabalho,
+                comunicacao_cliente, orcamento_nao_necessario,
+                primeira_resposta, cliente_percebeu_valor, pct_marcos_prazo,
+                variacao_escopo, impacto_cliente, abertura_cliente,
+                satisfacao_cliente, suficiencia_orcamento_nota, dados_iniciais_adicionais
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+            (
+                data.projeto_externo_id, contrato_id, datetime.now().date(), data.modelo_gerenciamento,
+                data.pct_conclusao, data.status_cronograma, motivos_str,
+                data.capacitacao_equipe, data.eficacia_metodologia, data.nivel_retrabalho,
+                data.comunicacao_cliente, orcamento_nao_necessario,
+                1 if data.primeira_resposta == 'Sim' else 0, data.cliente_percebeu_valor, data.pct_marcos_prazo,
+                data.variacao_escopo, data.impacto_cliente, data.abertura_cliente,
+                data.satisfacao_cliente, suficiencia_nota, dados_iniciais_str,
+            ),
+        )
+        acomp_id = cur.lastrowid
+        if data.possui_orientador == 'Sim':
+            cur.execute(
+                '''INSERT INTO acomp_orientador (acompanhamento_id, possui_orientador, nome_orientador,
+                       efetividade_orientador, disponibilidade_orientador) VALUES (%s, 1, %s, %s, %s)''',
+                (acomp_id, data.nome_orientador or 'Sem nome', data.efetividade_orientador, data.disponibilidade_orientador),
+            )
+        if data.modelo_gerenciamento == 'Ágil' and data.pct_story_points:
+            cur.execute(
+                'INSERT INTO acomp_sprint (acompanhamento_id, pct_story_points) VALUES (%s, %s)',
+                (acomp_id, data.pct_story_points),
+            )
+            if data.houve_impedimentos == 'Sim' and data.tipos_impedimentos:
+                for imp in data.tipos_impedimentos:
+                    cur.execute(
+                        'INSERT INTO acomp_impedimento (acompanhamento_id, houve_impedimentos, tipo_impedimento) VALUES (%s, 1, %s)',
+                        (acomp_id, imp),
+                    )
+        return acomp_id
 
 
 @app.post('/api/pape')
@@ -1190,104 +1236,13 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
                 detail='Este projeto não está vinculado à gerente selecionada',
             )
 
-        acomp_query = '''
-        INSERT INTO acompanhamento_projeto (
-            projeto_externo_id, contrato_id, data_resposta, modelo_gerenciamento,
-            pct_conclusao, status_cronograma, motivos_atraso,
-            capacitacao_equipe, eficacia_metodologia, nivel_retrabalho,
-            comunicacao_cliente, orcamento_nao_necessario,
-            primera_resposta, cliente_percebeu_valor, pct_marcos_prazo,
-            variacao_escopo, impacto_cliente, abertura_cliente,
-            satisfacao_cliente, suficiencia_orcamento_nota, dados_iniciais_adicionados
-        )
-        SELECT %s, c.id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-        FROM contrato c
-        WHERE c.projeto_externo_id = %s
-        LIMIT 1
-        '''
-
-        motivos_str = json.dumps(data.motivos_atraso) if data.motivos_atraso else None
-        orcamento_nao_necessario = 1 if data.suficiencia_orcamento == 'Não necessitou' else 0
-        suficiencia_nota = int(data.suficiencia_orcamento) if data.suficiencia_orcamento and data.suficiencia_orcamento != 'Não necessitou' else None
-        
-        dados_iniciais = {
-            "descricao_projeto": data.descricao_projeto,
-            "data_inicio": data.data_inicio,
-            "numero_contrato": data.numero_contrato,
-            "valor_projeto": data.valor_projeto,
-            "servicos_projeto": data.servicos_projeto,
-            "coordenacoes": data.coordenacoes
-        }
-        dados_iniciais_str = json.dumps(dados_iniciais) if any(dados_iniciais.values()) else None
-
-        acomp_id = await asyncio.to_thread(
-            execute_insert,
-            acomp_query,
-            (
-                data.projeto_externo_id,
-                datetime.now().date(),
-                data.modelo_gerenciamento,
-                data.pct_conclusao,
-                data.status_cronograma,
-                motivos_str,
-                data.capacitacao_equipe,
-                data.eficacia_metodologia,
-                data.nivel_retrabalho,
-                data.comunicacao_cliente,
-                orcamento_nao_necessario,
-                1 if data.primeira_resposta == 'Sim' else 0,
-                data.cliente_percebeu_valor,
-                data.pct_marcos_prazo,
-                data.variacao_escopo,
-                data.impacto_cliente,
-                data.abertura_cliente,
-                data.satisfacao_cliente,
-                suficiencia_nota,
-                dados_iniciais_str,
-                data.projeto_externo_id,
-            ),
-        )
-
-        if not acomp_id:
-            raise Exception('Nenhuma linha inserida em acompanhamento_projeto')
+        acomp_id = await asyncio.to_thread(_submit_pape_tx, data)
 
         await update_project_orientador_if_unknown(
             data.projeto_externo_id,
             data.possui_orientador,
             data.nome_orientador,
         )
-
-        if data.possui_orientador == 'Sim':
-            orient_query = '''
-            INSERT INTO acomp_orientador (
-                acompanhamento_id, possui_orientador, nome_orientador,
-                efetividade_orientador, disponibilidade_orientador
-            )
-            VALUES (%s, 1, %s, %s, %s)
-            '''
-            await asyncio.to_thread(
-                execute_query, orient_query, (
-                    acomp_id, 
-                    data.nome_orientador or 'Sem nome',
-                    data.efetividade_orientador,
-                    data.disponibilidade_orientador
-                )
-            )
-
-        if data.modelo_gerenciamento == 'Ágil' and data.pct_story_points:
-            sprint_query = '''
-            INSERT INTO acomp_sprint (acompanhamento_id, pct_story_points)
-            VALUES (%s, %s)
-            '''
-            await asyncio.to_thread(execute_query, sprint_query, (acomp_id, data.pct_story_points))
-
-            if data.houve_impedimentos == 'Sim' and data.tipos_impedimentos:
-                for impedimento in data.tipos_impedimentos:
-                    imp_query = '''
-                    INSERT INTO acomp_impedimento (acompanhamento_id, houve_impedimentos, tipo_impedimento)
-                    VALUES (%s, 1, %s)
-                    '''
-                    await asyncio.to_thread(execute_query, imp_query, (acomp_id, impedimento))
 
         n8n_payload = {
             'acompanhamento_id': acomp_id,
@@ -1301,12 +1256,11 @@ async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
             'message': 'Formulário enviado com sucesso',
             'acompanhamento_id': acomp_id,
         }
-
     except HTTPException:
         raise
-    except Exception as e:
-        print(f'Erro ao submeter PAPE: {e}')
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro ao submeter PAPE')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 @app.get('/api/dashboard/pape')
@@ -1481,8 +1435,8 @@ async def get_dashboard_pape(
             ap.impacto_cliente,
             acs.pct_story_points,
             COALESCE(imp.impedimentos, '') as impedimentos,
-            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionados, '$.intervencao_pmo')) as intervencao_pmo,
-            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionados, '$.solicitou_1_1')) as one_on_one_pmo,
+            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionais, '$.intervencao_pmo')) as intervencao_pmo,
+            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionais, '$.solicitou_1_1')) as one_on_one_pmo,
             COALESCE((
                 SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
                 FROM membro_projeto mp
@@ -1524,8 +1478,8 @@ async def get_dashboard_pape(
             ap.capacitacao_equipe,
             ap.nivel_retrabalho,
             COALESCE(ap.suficiencia_orcamento_nota, ap.suficiencia_orcamento) as suficiencia_orcamento,
-            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionados, '$.intervencao_pmo')) as intervencao_pmo,
-            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionados, '$.solicitou_1_1')) as one_on_one_pmo,
+            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionais, '$.intervencao_pmo')) as intervencao_pmo,
+            JSON_UNQUOTE(JSON_EXTRACT(ap.dados_iniciais_adicionais, '$.solicitou_1_1')) as one_on_one_pmo,
             COALESCE((
                 SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
                 FROM membro_projeto mp
@@ -1614,8 +1568,9 @@ async def get_dashboard_pape(
             'detalhe': build_detalhe_dashboard(detalhe_rows or [], projeto_id),
             'datas_disponiveis': datas_disponiveis,
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 def parse_valor_projeto(valor_str: str | None) -> float:
@@ -1651,7 +1606,7 @@ async def get_coordenacao_do_membro(membro_id: int) -> int | None:
 
 
 @app.post('/api/projetos')
-async def create_projeto(data: ProjetoCreate):
+async def create_projeto(data: ProjetoCreate, _auth: None = Depends(require_admin_token)):
     try:
         # Validar número de contrato antes de qualquer INSERT
         if data.numero_contrato and data.numero_contrato.strip():
@@ -1697,8 +1652,9 @@ async def create_projeto(data: ProjetoCreate):
 
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception('Erro interno')
+        raise HTTPException(status_code=500, detail='Erro interno do servidor')
 
 
 async def _create_projeto_relations(projeto_id: int, data: ProjetoCreate, data_inicio: str | None) -> None:

@@ -3,6 +3,12 @@ from mysql.connector import Error
 from mysql.connector.pooling import MySQLConnectionPool
 import os
 from dotenv import load_dotenv
+import logging
+from contextlib import contextmanager
+
+
+logger = logging.getLogger('pape.db')
+
 
 load_dotenv()
 
@@ -48,8 +54,8 @@ def execute_query(query: str, params=None, fetch_one=False, fetch_all=False):
 
         cursor.close()
         return result
-    except Error as e:
-        print(f'Erro ao executar query: {e}')
+    except Error:
+        logger.exception('Erro ao executar query')
         if connection:
             connection.rollback()
         raise
@@ -72,11 +78,29 @@ def execute_insert(query: str, params=None) -> int:
         lastrowid = cursor.lastrowid
         cursor.close()
         return lastrowid
-    except Error as e:
-        print(f'Erro ao executar insert: {e}')
+    except Error:
+        logger.exception('Erro ao executar insert')
         if connection:
             connection.rollback()
         raise
     finally:
         if connection and connection.is_connected():
             connection.close()
+
+
+@contextmanager
+def transaction():
+    """Abre uma conexão do pool e garante commit/rollback/close únicos.
+    Use o objeto connection devolvido para criar cursores e executar várias escritas
+    de forma atômica."""
+    connection = get_db_connection()
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        if connection.is_connected():
+            connection.close()
+

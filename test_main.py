@@ -1,9 +1,11 @@
 import importlib
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
+from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
+
 
 
 def import_main_without_database():
@@ -621,7 +623,21 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
 class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.main = import_main_without_database()
+        self.main.ADMIN_API_TOKEN = 'token-de-teste'
         self.client = TestClient(self.main.app)
+        self.auth = {'Authorization': 'Bearer token-de-teste'}
+
+    async def test_update_projeto_unauthorized_without_token(self):
+        response = self.client.put('/api/projetos/10', json={
+            'nome': 'Projeto Teste',
+            'descricao_projeto': 'Desc',
+            'data_inicio': '2026-05-01',
+            'numero_contrato': '123',
+            'valor_total': 1500.0,
+            'possui_orientador': 0,
+            'nome_orientador': None
+        })
+        self.assertEqual(response.status_code, 401)
 
     async def test_update_projeto_not_found(self):
         async def run_sync(func, *args, **kwargs):
@@ -631,7 +647,7 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
             patch.object(self.main, 'execute_query', return_value=None) as execute_query,
             patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
         ):
-            response = self.client.put('/api/projetos/999', json={
+            response = self.client.put('/api/projetos/999', headers=self.auth, json={
                 'nome': 'Projeto Teste',
                 'descricao_projeto': 'Desc',
                 'data_inicio': '2026-05-01',
@@ -659,7 +675,7 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
             patch.object(self.main, 'execute_query', side_effect=mock_returns) as execute_query,
             patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
         ):
-            response = self.client.put('/api/projetos/10', json={
+            response = self.client.put('/api/projetos/10', headers=self.auth, json={
                 'nome': 'Projeto Editado',
                 'descricao_projeto': 'Desc Editada',
                 'data_inicio': '2026-05-01',
@@ -685,58 +701,193 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
 class DeleteProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.main = import_main_without_database()
+        self.main.ADMIN_API_TOKEN = 'token-de-teste'
         self.client = TestClient(self.main.app)
+        self.auth = {'Authorization': 'Bearer token-de-teste'}
 
-    async def test_delete_projeto_wrong_password_returns_403(self):
-        response = self.client.delete('/api/projetos/10?senha=senhaErrada')
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()['detail'], 'Senha incorreta. A exclusão não foi autorizada.')
+    async def test_delete_projeto_unauthorized_without_token(self):
+        response = self.client.delete('/api/projetos/10')
+        self.assertEqual(response.status_code, 401)
 
     async def test_delete_projeto_not_found_returns_404(self):
         async def run_sync(func, *args, **kwargs):
             return func(*args, **kwargs)
 
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None  # projeto não existe
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        @contextmanager
+        def fake_tx():
+            yield conn
+
         with (
-            patch.object(self.main, 'execute_query', return_value=None),
+            patch.object(self.main, 'transaction', fake_tx),
             patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
         ):
-            response = self.client.delete('/api/projetos/999?senha=ProjetosDib')
+            response = self.client.delete('/api/projetos/999', headers=self.auth)
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()['detail'], 'Projeto não encontrado')
 
-    async def test_delete_projeto_success(self):
+    async def test_delete_projeto_success_runs_in_one_transaction(self):
         async def run_sync(func, *args, **kwargs):
             return func(*args, **kwargs)
 
-        # Retorna o projeto existente na verificação inicial, None nas demais
-        call_returns = [{'id': 10}] + [None] * 10
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {'id': 10}  # projeto existe
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        @contextmanager
+        def fake_tx():
+            yield conn
 
         with (
-            patch.object(self.main, 'execute_query', side_effect=call_returns) as execute_query,
+            patch.object(self.main, 'transaction', fake_tx),
             patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
         ):
-            response = self.client.delete('/api/projetos/10?senha=ProjetosDib')
+            response = self.client.delete('/api/projetos/10', headers=self.auth)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {'success': True, 'message': 'Projeto excluído com sucesso'})
+        # Todas as escritas no MESMO cursor (mesma conexão/transação):
+        executed = ' '.join(call.args[0] for call in cursor.execute.call_args_list)
+        self.assertIn('DELETE FROM projeto_externo WHERE id', executed)
+        self.assertIn('DELETE FROM acompanhamento_projeto', executed)
+        self.assertIn('UPDATE transacao', executed)
 
-        # Verifica que foram feitas 9 chamadas ao banco:
-        # 1 check + 2 UPDATEs transacao + 6 DELETEs + 1 DELETE projeto_externo
-        self.assertEqual(execute_query.call_count, 9)
 
-        queries = [call.args[0].strip() for call in execute_query.call_args_list]
-        self.assertIn('SELECT id FROM projeto_externo WHERE id = %s', queries[0])
-        self.assertIn('UPDATE transacao', queries[1])
-        self.assertIn('UPDATE transacao SET projeto_externo_id = NULL', queries[2])
-        self.assertIn('DELETE FROM contrato_pagamento', queries[3])
-        self.assertIn('DELETE FROM acompanhamento_projeto', queries[4])
-        self.assertIn('DELETE FROM membro_projeto', queries[5])
-        self.assertIn('DELETE FROM projeto_servico', queries[6])
-        self.assertIn('DELETE FROM contrato', queries[7])
-        self.assertIn('DELETE FROM projeto_externo', queries[8])
+
+class AdminTokenTest(unittest.TestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    def test_rejects_when_token_not_configured(self):
+        self.main.ADMIN_API_TOKEN = ''
+        with self.assertRaises(self.main.HTTPException) as ctx:
+            self.main.require_admin_token(authorization='Bearer qualquer')
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    def test_rejects_missing_token(self):
+        self.main.ADMIN_API_TOKEN = 'token-de-teste'
+        with self.assertRaises(self.main.HTTPException) as ctx:
+            self.main.require_admin_token(authorization=None)
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_rejects_wrong_token(self):
+        self.main.ADMIN_API_TOKEN = 'token-de-teste'
+        with self.assertRaises(self.main.HTTPException) as ctx:
+            self.main.require_admin_token(authorization='Bearer errado')
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_accepts_valid_token(self):
+        self.main.ADMIN_API_TOKEN = 'token-de-teste'
+        self.assertIsNone(self.main.require_admin_token(authorization='Bearer token-de-teste'))
+
+
+class ErrorLeakTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+        self.client = TestClient(self.main.app, raise_server_exceptions=False)
+
+    def test_db_error_is_not_exposed(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError('detalhe-secreto-do-banco')
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=boom),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = self.client.get('/api/coordenacoes')
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()['detail'], 'Erro interno do servidor')
+        self.assertNotIn('detalhe-secreto-do-banco', response.text)
+
+
+class TransactionTest(unittest.TestCase):
+    def setUp(self):
+        import importlib, sys
+        sys.modules.pop('database', None)
+        with patch('mysql.connector.pooling.MySQLConnectionPool'):
+            self.database = importlib.import_module('database')
+
+    def test_commits_and_closes_on_success(self):
+        conn = self.database._pool.get_connection.return_value
+        conn.reset_mock()
+        with self.database.transaction() as c:
+            self.assertIs(c, conn)
+        conn.commit.assert_called_once()
+        conn.rollback.assert_not_called()
+        conn.close.assert_called_once()
+
+    def test_rolls_back_on_exception(self):
+        conn = self.database._pool.get_connection.return_value
+        conn.reset_mock()
+        with self.assertRaises(ValueError):
+            with self.database.transaction():
+                raise ValueError('falhou no meio')
+        conn.rollback.assert_called_once()
+        conn.commit.assert_not_called()
+        conn.close.assert_called_once()
+
+
+class SubmitPapeTransactionTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    async def test_submit_succeeds_without_contract(self):
+        cursor = MagicMock()
+        # 1ª query: lookup do contrato_id -> None (projeto sem contrato)
+        # 2ª query: INSERT do acompanhamento -> lastrowid 123
+        cursor.fetchone.return_value = {'contrato_id': None}
+        cursor.lastrowid = 123
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        @contextmanager
+        def fake_tx():
+            yield conn
+
+        async def fake_validate(nome, pid):
+            return True
+
+        with (
+            patch.object(self.main, 'transaction', fake_tx),
+            patch.object(self.main, 'validate_project_manager', side_effect=fake_validate),
+            patch.object(self.main, 'update_project_orientador_if_unknown', side_effect=lambda *a, **k: None),
+        ):
+            self.main.update_project_orientador_if_unknown = \
+                lambda *a, **k: __import__('asyncio').sleep(0)
+            acomp_id = self.main._submit_pape_tx(self._payload())
+
+        self.assertEqual(acomp_id, 123)
+        executed = ' '.join(call.args[0] for call in cursor.execute.call_args_list)
+        self.assertIn('INSERT INTO acompanhamento_projeto', executed)
+
+    def _payload(self):
+        return self.main.PapeFormData(
+            respondente_nome='Ana Silva',
+            projeto_externo_id=1,
+            primeira_resposta='Não',
+            possui_orientador='Não',
+            modelo_gerenciamento='Tradicional',
+            pct_conclusao='41-60%',
+            status_cronograma='Dentro do prazo',
+            capacitacao_equipe=4, eficacia_metodologia=4, nivel_retrabalho=2,
+            comunicacao_cliente=4, abertura_cliente=4, satisfacao_cliente=4,
+        )
 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
+
 
