@@ -909,6 +909,26 @@ class GlobalExceptionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('segredo-interno', response.text)
 
 
+class CorsTest(unittest.TestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+        self.client = TestClient(self.main.app)
+
+    def test_preflight_allows_known_origin_and_methods(self):
+        response = self.client.options(
+            '/api/projetos',
+            headers={
+                'Origin': 'http://localhost:3000',
+                'Access-Control-Request-Method': 'POST',
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get('access-control-allow-origin'), 'http://localhost:3000')
+        allow_methods = response.headers.get('access-control-allow-methods', '')
+        self.assertIn('POST', allow_methods)
+        self.assertNotIn('*', allow_methods)
+
+
 class LifespanTest(unittest.TestCase):
     def test_lifespan_inits_pool_on_startup_and_clears_on_shutdown(self):
         sys.modules.pop('main', None)
