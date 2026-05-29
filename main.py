@@ -1013,6 +1013,27 @@ async def delete_projeto(projeto_id: int, _auth: None = Depends(require_admin_to
     return {'success': True, 'message': 'Projeto excluído com sucesso'}
 
 
+def _delete_acompanhamento_tx(acompanhamento_id: int) -> bool:
+    with transaction() as conn:
+        cur = conn.cursor()
+        cur.execute('SELECT id FROM acompanhamento_projeto WHERE id = %s', (acompanhamento_id,))
+        if not cur.fetchone():
+            return False
+        cur.execute('DELETE FROM acomp_orientador WHERE acompanhamento_id = %s', (acompanhamento_id,))
+        cur.execute('DELETE FROM acomp_sprint WHERE acompanhamento_id = %s', (acompanhamento_id,))
+        cur.execute('DELETE FROM acomp_impedimento WHERE acompanhamento_id = %s', (acompanhamento_id,))
+        cur.execute('DELETE FROM acompanhamento_projeto WHERE id = %s', (acompanhamento_id,))
+        return True
+
+
+@app.delete('/api/acompanhamentos/{acompanhamento_id}')
+async def delete_acompanhamento(acompanhamento_id: int, _auth: None = Depends(require_admin_token)):
+    existe = await asyncio.to_thread(_delete_acompanhamento_tx, acompanhamento_id)
+    if not existe:
+        raise HTTPException(status_code=404, detail='Acompanhamento não encontrado')
+    return {'success': True, 'message': 'Acompanhamento excluído com sucesso'}
+
+
 
 @app.get('/api/coordenacoes', response_model=list[Coordenacao])
 async def get_coordenacoes():

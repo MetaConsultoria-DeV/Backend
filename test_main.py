@@ -929,6 +929,65 @@ class CorsTest(unittest.TestCase):
         self.assertNotIn('*', allow_methods)
 
 
+class DeleteAcompanhamentoEndpointTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+        self.client = TestClient(self.main.app)
+
+    async def test_delete_acompanhamento_success(self):
+        conn = MagicMock()
+        cursor = conn.cursor.return_value
+        cursor.fetchone.return_value = {'id': 1}  # existe
+
+        @contextmanager
+        def fake_tx():
+            yield conn
+
+        with (
+            patch.object(self.main, 'transaction', fake_tx),
+            patch.dict(self.main.os.environ, {'ADMIN_API_TOKEN': 'test_token'}),
+        ):
+            self.main.ADMIN_API_TOKEN = 'test_token'
+            response = self.client.delete(
+                '/api/acompanhamentos/1',
+                headers={'Authorization': 'Bearer test_token'}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['success'], True)
+        # verifica se executou o delete nas tabelas
+        executed = ' '.join(call.args[0] for call in cursor.execute.call_args_list)
+        self.assertIn('DELETE FROM acomp_orientador', executed)
+        self.assertIn('DELETE FROM acomp_sprint', executed)
+        self.assertIn('DELETE FROM acomp_impedimento', executed)
+        self.assertIn('DELETE FROM acompanhamento_projeto', executed)
+
+    async def test_delete_acompanhamento_not_found(self):
+        conn = MagicMock()
+        cursor = conn.cursor.return_value
+        cursor.fetchone.return_value = None  # não existe
+
+        @contextmanager
+        def fake_tx():
+            yield conn
+
+        with (
+            patch.object(self.main, 'transaction', fake_tx),
+            patch.dict(self.main.os.environ, {'ADMIN_API_TOKEN': 'test_token'}),
+        ):
+            self.main.ADMIN_API_TOKEN = 'test_token'
+            response = self.client.delete(
+                '/api/acompanhamentos/999',
+                headers={'Authorization': 'Bearer test_token'}
+            )
+
+        self.assertEqual(response.status_code, 404)
+
+    async def test_delete_acompanhamento_unauthorized(self):
+        response = self.client.delete('/api/acompanhamentos/1')
+        self.assertEqual(response.status_code, 401)
+
+
 class LifespanTest(unittest.TestCase):
     def test_lifespan_inits_pool_on_startup_and_clears_on_shutdown(self):
         sys.modules.pop('main', None)
