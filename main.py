@@ -4,7 +4,7 @@ from datetime import datetime
 import asyncio
 import httpx
 import json
-from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao, ProjetoUpdate
+from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao, ProjetoUpdate, ProjetoCreate
 from database import execute_query, execute_insert
 import os
 from dotenv import load_dotenv
@@ -1614,6 +1614,119 @@ async def get_dashboard_pape(
             'detalhe': build_detalhe_dashboard(detalhe_rows or [], projeto_id),
             'datas_disponiveis': datas_disponiveis,
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def parse_valor_projeto(valor_str: str | None) -> float:
+    """Converte string no formato brasileiro ('1.000,00') para float."""
+    if not valor_str:
+        return 0.0
+    try:
+        return float(valor_str.replace('.', '').replace(',', '.'))
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+async def get_cargo_consultor_do_membro(membro_id: int) -> int:
+    """Retorna o cargo_id de consultor do membro (10 ou 11). Padrão: 10 (Consultor de Projetos)."""
+    result = await asyncio.to_thread(
+        execute_query,
+        'SELECT cargo_id FROM membro_cargo WHERE membro_id = %s AND cargo_id IN (10, 11) LIMIT 1',
+        (membro_id,),
+        fetch_one=True,
+    )
+    return result['cargo_id'] if result else 10
+
+
+async def get_coordenacao_do_membro(membro_id: int) -> int | None:
+    """Retorna a coordenacao_id principal do membro."""
+    result = await asyncio.to_thread(
+        execute_query,
+        'SELECT coordenacao_id FROM membro_coordenacao WHERE membro_id = %s LIMIT 1',
+        (membro_id,),
+        fetch_one=True,
+    )
+    return result['coordenacao_id'] if result else None
+
+
+@app.post('/api/projetos')
+async def create_projeto(data: ProjetoCreate):
+    try:
+        # 1. Criar projeto_externo
+        possui_orientador_value = 1 if data.possui_orientador == 'Sim' else 0
+        nome_orientador_value = data.nome_orientador if possui_orientador_value else None
+        data_inicio = data.data_inicio or None
+
+        projeto_id = await asyncio.to_thread(
+            execute_insert,
+            '''INSERT INTO projeto_externo (nome, descricao_projeto, data_inicio, possui_orientador, nome_orientador)
+               VALUES (%s, %s, %s, %s, %s)''',
+            (data.nome_projeto, data.descricao_projeto, data_inicio, possui_orientador_value, nome_orientador_value),
+        )
+
+        if not projeto_id:
+            raise Exception('Falha ao criar projeto_externo')
+
+        # 2. Criar contrato (apenas se houver cliente cadastrado)
+        cliente = await asyncio.to_thread(execute_query, 'SELECT id FROM cliente LIMIT 1', fetch_one=True)
+        if cliente:
+            numero = data.numero_contrato.strip() if data.numero_contrato else f'CONTRATO-TEMP-{projeto_id}'
+            valor = parse_valor_projeto(data.valor_projeto)
+            await asyncio.to_thread(
+                execute_insert,
+                'INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total) VALUES (%s, %s, %s, %s)',
+                (cliente['id'], projeto_id, numero, valor),
+            )
+
+        # 3. Vincular serviços
+        for servico_id in (data.servicos_projeto or []):
+            await asyncio.to_thread(
+                execute_query,
+                'INSERT IGNORE INTO projeto_servico (projeto_externo_id, servico_id) VALUES (%s, %s)',
+                (projeto_id, servico_id),
+            )
+
+        # 4. Vincular consultores — cargo vem de membro_cargo (10 ou 11), default 10
+        for chave in (data.membros_projeto or []):
+            partes = chave.split('-')
+            if len(partes) != 2:
+                continue
+            try:
+                membro_id = int(partes[0])
+                coordenacao_id = int(partes[1])
+            except ValueError:
+                continue
+            cargo_id = await get_cargo_consultor_do_membro(membro_id)
+            await asyncio.to_thread(
+                execute_query,
+                '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
+                   VALUES (%s, %s, %s, %s, %s)''',
+                (membro_id, projeto_id, coordenacao_id, cargo_id, data_inicio),
+            )
+
+        # 5. Vincular gerente — cargo_id 31 (Gerente de Projeto)
+        if data.gerente_projeto:
+            gerente = await asyncio.to_thread(
+                execute_query,
+                'SELECT id FROM membro WHERE nome = %s LIMIT 1',
+                (data.gerente_projeto,),
+                fetch_one=True,
+            )
+            if gerente:
+                coordenacao_id = await get_coordenacao_do_membro(gerente['id'])
+                if coordenacao_id:
+                    await asyncio.to_thread(
+                        execute_query,
+                        '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
+                           VALUES (%s, %s, %s, %s, %s)''',
+                        (gerente['id'], projeto_id, coordenacao_id, 31, data_inicio),
+                    )
+
+        return {'success': True, 'projeto_id': projeto_id}
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

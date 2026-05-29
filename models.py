@@ -118,3 +118,16 @@ class ProjetoUpdate(BaseModel):
     possui_orientador: Optional[int] = None
     nome_orientador: Optional[str] = None
 
+
+class ProjetoCreate(BaseModel):
+    nome_projeto: str
+    descricao_projeto: Optional[str] = None
+    data_inicio: Optional[str] = None
+    numero_contrato: Optional[str] = None
+    valor_projeto: Optional[str] = None
+    servicos_projeto: Optional[List[int]] = None
+    membros_projeto: Optional[List[str]] = None  # chaves "membroId-coordenacaoId"
+    gerente_projeto: Optional[str] = None
+    possui_orientador: Literal['Sim', 'Não'] = 'Não'
+    nome_orientador: Optional[str] = None
+
