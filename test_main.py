@@ -816,6 +816,7 @@ class TransactionTest(unittest.TestCase):
         sys.modules.pop('database', None)
         with patch('mysql.connector.pooling.MySQLConnectionPool'):
             self.database = importlib.import_module('database')
+            self.database.init_pool()
 
     def test_commits_and_closes_on_success(self):
         conn = self.database._pool.get_connection.return_value
@@ -883,6 +884,29 @@ class SubmitPapeTransactionTest(unittest.IsolatedAsyncioTestCase):
             comunicacao_cliente=4, abertura_cliente=4, satisfacao_cliente=4,
         )
 
+
+
+class GlobalExceptionHandlerTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+        self.client = TestClient(self.main.app, raise_server_exceptions=False)
+
+    def test_unhandled_error_returns_generic_500(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError('segredo-interno')
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=boom),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = self.client.get('/api/coordenacoes')
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()['detail'], 'Erro interno do servidor')
+        self.assertNotIn('segredo-interno', response.text)
 
 
 class LifespanTest(unittest.TestCase):

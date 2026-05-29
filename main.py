@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import asyncio
@@ -36,6 +37,12 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*'],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception('Erro não tratado em %s', request.url.path)
+    return JSONResponse(status_code=500, content={'detail': 'Erro interno do servidor'})
 
 N8N_WEBHOOK_URL = os.getenv('N8N_WEBHOOK_URL', 'http://localhost:5678/webhook/pape')
 ADMIN_API_TOKEN = os.getenv('ADMIN_API_TOKEN', '')
@@ -91,17 +98,11 @@ async def get_projetos(gerente_id: int | None = None):
     {manager_filter}
     ORDER BY pe.nome
     '''.format(manager_filter=manager_filter)
-    try:
-        if params:
-            resultado = await asyncio.to_thread(execute_query, query, params, fetch_all=True)
-        else:
-            resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
-        return resultado or []
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    if params:
+        resultado = await asyncio.to_thread(execute_query, query, params, fetch_all=True)
+    else:
+        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+    return resultado or []
 
 
 @app.get('/api/projetos/all', response_model=list[ProjetoListItem])
@@ -135,39 +136,35 @@ async def get_all_projetos():
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
     ORDER BY pe.nome
     '''
-    try:
-        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
-        if not resultado:
-            return []
+    resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+    if not resultado:
+        return []
+    
+    projetos = []
+    for r in resultado:
+        status = 'ativo'
+        # 1. Finalizado
+        if (
+            r.get('finalizado_em') is not None or 
+            r.get('fase_atual') in ('Concluido', 'Cancelado') or
+            r.get('status_cronograma') == 'Concluido'
+        ):
+            status = 'finalizado'
+        # 2. Pausado
+        elif (
+            (r.get('descricao') and 'pausado' in r.get('descricao').lower()) or
+            r.get('fase_atual') == 'Pausado'
+        ):
+            status = 'pausado'
         
-        projetos = []
-        for r in resultado:
-            status = 'ativo'
-            # 1. Finalizado
-            if (
-                r.get('finalizado_em') is not None or 
-                r.get('fase_atual') in ('Concluido', 'Cancelado') or
-                r.get('status_cronograma') == 'Concluido'
-            ):
-                status = 'finalizado'
-            # 2. Pausado
-            elif (
-                (r.get('descricao') and 'pausado' in r.get('descricao').lower()) or
-                r.get('fase_atual') == 'Pausado'
-            ):
-                status = 'pausado'
-            
-            projetos.append({
-                'id': r['id'],
-                'nome': r['nome'],
-                'numero_contrato': r['numero_contrato'] if r['numero_contrato'] and not r['numero_contrato'].startswith('CONTRATO-TEMP') else None,
-                'gerente': r['gerente'] or 'Sem gerente',
-                'status': status
-            })
-        return projetos
-    except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+        projetos.append({
+            'id': r['id'],
+            'nome': r['nome'],
+            'numero_contrato': r['numero_contrato'] if r['numero_contrato'] and not r['numero_contrato'].startswith('CONTRATO-TEMP') else None,
+            'gerente': r['gerente'] or 'Sem gerente',
+            'status': status
+        })
+    return projetos
 
 
 async def validate_project_manager(respondente_nome: str, projeto_externo_id: int) -> bool:
@@ -865,135 +862,123 @@ async def get_projeto_detalhes(projeto_id: int):
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
     WHERE pe.id = %s
     '''
-    try:
-        projeto = await asyncio.to_thread(execute_query, query, (projeto_id,), fetch_one=True)
-        if not projeto:
-            raise HTTPException(status_code=404, detail='Projeto não encontrado')
+    projeto = await asyncio.to_thread(execute_query, query, (projeto_id,), fetch_one=True)
+    if not projeto:
+        raise HTTPException(status_code=404, detail='Projeto não encontrado')
 
-        servicos_query = '''
-        SELECT s.id, s.nome
-        FROM projeto_servico ps
-        JOIN servico s ON s.id = ps.servico_id
-        WHERE ps.projeto_externo_id = %s
-        '''
-        coordenacoes_query = '''
-        SELECT DISTINCT c.id, c.nome
-        FROM projeto_servico ps
-        JOIN servico s ON s.id = ps.servico_id
-        JOIN coordenacao c ON c.id = s.coordenacao_id
-        WHERE ps.projeto_externo_id = %s
-        '''
-        membros_query = '''
-        SELECT m.id, m.nome, m.email, cg.nome as cargo, co.nome as coordenacao, co.sigla as coordenacao_sigla
-        FROM membro_projeto mp
-        JOIN membro m ON m.id = mp.membro_id
-        JOIN cargo cg ON cg.id = mp.cargo_id
-        LEFT JOIN coordenacao co ON co.id = mp.coordenacao_id
-        WHERE mp.projeto_externo_id = %s
-          AND mp.data_saida IS NULL
-        ORDER BY m.nome
-        '''
-        acompanhamentos_query = '''
-        SELECT ap.id, ap.data_resposta, ap.modelo_gerenciamento, ap.pct_conclusao,
-               ap.status_cronograma, ap.motivos_atraso, ap.capacitacao_equipe,
-               ap.eficacia_metodologia, ap.nivel_retrabalho, ap.comunicacao_cliente,
-               ap.suficiencia_orcamento_nota, ap.orcamento_nao_necessario,
-               ap.cliente_percebeu_valor, ap.pct_marcos_prazo, ap.variacao_escopo,
-               ap.impacto_cliente, ap.abertura_cliente, ap.satisfacao_cliente,
-               ao.nome_orientador, ao.efetividade_orientador, ao.disponibilidade_orientador
-        FROM acompanhamento_projeto ap
-        LEFT JOIN acomp_orientador ao ON ao.acompanhamento_id = ap.id
-        WHERE ap.projeto_externo_id = %s
-        ORDER BY ap.data_resposta DESC, ap.id DESC
-        '''
+    servicos_query = '''
+    SELECT s.id, s.nome
+    FROM projeto_servico ps
+    JOIN servico s ON s.id = ps.servico_id
+    WHERE ps.projeto_externo_id = %s
+    '''
+    coordenacoes_query = '''
+    SELECT DISTINCT c.id, c.nome
+    FROM projeto_servico ps
+    JOIN servico s ON s.id = ps.servico_id
+    JOIN coordenacao c ON c.id = s.coordenacao_id
+    WHERE ps.projeto_externo_id = %s
+    '''
+    membros_query = '''
+    SELECT m.id, m.nome, m.email, cg.nome as cargo, co.nome as coordenacao, co.sigla as coordenacao_sigla
+    FROM membro_projeto mp
+    JOIN membro m ON m.id = mp.membro_id
+    JOIN cargo cg ON cg.id = mp.cargo_id
+    LEFT JOIN coordenacao co ON co.id = mp.coordenacao_id
+    WHERE mp.projeto_externo_id = %s
+      AND mp.data_saida IS NULL
+    ORDER BY m.nome
+    '''
+    acompanhamentos_query = '''
+    SELECT ap.id, ap.data_resposta, ap.modelo_gerenciamento, ap.pct_conclusao,
+           ap.status_cronograma, ap.motivos_atraso, ap.capacitacao_equipe,
+           ap.eficacia_metodologia, ap.nivel_retrabalho, ap.comunicacao_cliente,
+           ap.suficiencia_orcamento_nota, ap.orcamento_nao_necessario,
+           ap.cliente_percebeu_valor, ap.pct_marcos_prazo, ap.variacao_escopo,
+           ap.impacto_cliente, ap.abertura_cliente, ap.satisfacao_cliente,
+           ao.nome_orientador, ao.efetividade_orientador, ao.disponibilidade_orientador
+    FROM acompanhamento_projeto ap
+    LEFT JOIN acomp_orientador ao ON ao.acompanhamento_id = ap.id
+    WHERE ap.projeto_externo_id = %s
+    ORDER BY ap.data_resposta DESC, ap.id DESC
+    '''
 
-        servicos, coordenacoes, membros, acompanhamentos = await asyncio.gather(
-            asyncio.to_thread(execute_query, servicos_query, (projeto_id,), fetch_all=True),
-            asyncio.to_thread(execute_query, coordenacoes_query, (projeto_id,), fetch_all=True),
-            asyncio.to_thread(execute_query, membros_query, (projeto_id,), fetch_all=True),
-            asyncio.to_thread(execute_query, acompanhamentos_query, (projeto_id,), fetch_all=True)
-        )
+    servicos, coordenacoes, membros, acompanhamentos = await asyncio.gather(
+        asyncio.to_thread(execute_query, servicos_query, (projeto_id,), fetch_all=True),
+        asyncio.to_thread(execute_query, coordenacoes_query, (projeto_id,), fetch_all=True),
+        asyncio.to_thread(execute_query, membros_query, (projeto_id,), fetch_all=True),
+        asyncio.to_thread(execute_query, acompanhamentos_query, (projeto_id,), fetch_all=True)
+    )
 
-        projeto['servicos'] = servicos or []
-        projeto['coordenacoes'] = coordenacoes or []
-        projeto['membros'] = membros or []
-        
-        # Formatar campos complexos nos acompanhamentos (JSON de motivos de atraso)
-        # Usar parse_motivos_atraso para garantir decodificação de unicode escapes
-        for acomp in (acompanhamentos or []):
-            acomp['motivos_atraso'] = parse_motivos_atraso(acomp.get('motivos_atraso'))
+    projeto['servicos'] = servicos or []
+    projeto['coordenacoes'] = coordenacoes or []
+    projeto['membros'] = membros or []
+    
+    # Formatar campos complexos nos acompanhamentos (JSON de motivos de atraso)
+    # Usar parse_motivos_atraso para garantir decodificação de unicode escapes
+    for acomp in (acompanhamentos or []):
+        acomp['motivos_atraso'] = parse_motivos_atraso(acomp.get('motivos_atraso'))
 
-        projeto['acompanhamentos'] = acompanhamentos or []
-        return projeto
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    projeto['acompanhamentos'] = acompanhamentos or []
+    return projeto
 
 
 @app.put('/api/projetos/{projeto_id}')
 async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Depends(require_admin_token)):
-    try:
-        check_query = 'SELECT id FROM projeto_externo WHERE id = %s'
-        exists = await asyncio.to_thread(execute_query, check_query, (projeto_id,), fetch_one=True)
-        if not exists:
-            raise HTTPException(status_code=404, detail='Projeto não encontrado')
+    check_query = 'SELECT id FROM projeto_externo WHERE id = %s'
+    exists = await asyncio.to_thread(execute_query, check_query, (projeto_id,), fetch_one=True)
+    if not exists:
+        raise HTTPException(status_code=404, detail='Projeto não encontrado')
 
-        update_pe_query = '''
-        UPDATE projeto_externo
-        SET nome = %s,
-            descricao_projeto = %s,
-            data_inicio = %s,
-            possui_orientador = %s,
-            nome_orientador = %s
-        WHERE id = %s
+    update_pe_query = '''
+    UPDATE projeto_externo
+    SET nome = %s,
+        descricao_projeto = %s,
+        data_inicio = %s,
+        possui_orientador = %s,
+        nome_orientador = %s
+    WHERE id = %s
+    '''
+    data_inicio = data.data_inicio if data.data_inicio else None
+    nome_orientador = data.nome_orientador if data.possui_orientador == 1 else None
+
+    await asyncio.to_thread(
+        execute_query,
+        update_pe_query,
+        (data.nome, data.descricao_projeto, data_inicio, data.possui_orientador, nome_orientador, projeto_id)
+    )
+
+    contract_query = 'SELECT id FROM contrato WHERE projeto_externo_id = %s'
+    contract = await asyncio.to_thread(execute_query, contract_query, (projeto_id,), fetch_one=True)
+
+    if contract:
+        update_c_query = '''
+        UPDATE contrato
+        SET numero = %s,
+            valor_total = %s
+        WHERE projeto_externo_id = %s
         '''
-        data_inicio = data.data_inicio if data.data_inicio else None
-        nome_orientador = data.nome_orientador if data.possui_orientador == 1 else None
-
         await asyncio.to_thread(
             execute_query,
-            update_pe_query,
-            (data.nome, data.descricao_projeto, data_inicio, data.possui_orientador, nome_orientador, projeto_id)
+            update_c_query,
+            (data.numero_contrato or '', data.valor_total or 0.0, projeto_id)
+        )
+    elif data.numero_contrato or data.valor_total:
+        client_query = 'SELECT id FROM cliente LIMIT 1'
+        client = await asyncio.to_thread(execute_query, client_query, fetch_one=True)
+        client_id = client['id'] if client else 1
+
+        insert_c_query = '''
+        INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total)
+        VALUES (%s, %s, %s, %s)
+        '''
+        await asyncio.to_thread(
+            execute_query,
+            insert_c_query,
+            (client_id, projeto_id, data.numero_contrato or '', data.valor_total or 0.0)
         )
 
-        contract_query = 'SELECT id FROM contrato WHERE projeto_externo_id = %s'
-        contract = await asyncio.to_thread(execute_query, contract_query, (projeto_id,), fetch_one=True)
-
-        if contract:
-            update_c_query = '''
-            UPDATE contrato
-            SET numero = %s,
-                valor_total = %s
-            WHERE projeto_externo_id = %s
-            '''
-            await asyncio.to_thread(
-                execute_query,
-                update_c_query,
-                (data.numero_contrato or '', data.valor_total or 0.0, projeto_id)
-            )
-        elif data.numero_contrato or data.valor_total:
-            client_query = 'SELECT id FROM cliente LIMIT 1'
-            client = await asyncio.to_thread(execute_query, client_query, fetch_one=True)
-            client_id = client['id'] if client else 1
-
-            insert_c_query = '''
-            INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total)
-            VALUES (%s, %s, %s, %s)
-            '''
-            await asyncio.to_thread(
-                execute_query,
-                insert_c_query,
-                (client_id, projeto_id, data.numero_contrato or '', data.valor_total or 0.0)
-            )
-
-        return {'success': True, 'message': 'Projeto atualizado com sucesso'}
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    return {'success': True, 'message': 'Projeto atualizado com sucesso'}
 
 
 
@@ -1022,30 +1007,18 @@ def _delete_projeto_tx(projeto_id: int) -> bool:
 
 @app.delete('/api/projetos/{projeto_id}')
 async def delete_projeto(projeto_id: int, _auth: None = Depends(require_admin_token)):
-    try:
-        existe = await asyncio.to_thread(_delete_projeto_tx, projeto_id)
-        if not existe:
-            raise HTTPException(status_code=404, detail='Projeto não encontrado')
-        return {'success': True, 'message': 'Projeto excluído com sucesso'}
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro ao excluir projeto')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    existe = await asyncio.to_thread(_delete_projeto_tx, projeto_id)
+    if not existe:
+        raise HTTPException(status_code=404, detail='Projeto não encontrado')
+    return {'success': True, 'message': 'Projeto excluído com sucesso'}
 
 
 
 @app.get('/api/coordenacoes', response_model=list[Coordenacao])
 async def get_coordenacoes():
     query = 'SELECT id, nome FROM coordenacao ORDER BY nome'
-    try:
-        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
-        return resultado or []
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+    return resultado or []
 
 
 @app.get('/api/servicos', response_model=list[ServicosPorCoordenacao])
@@ -1057,31 +1030,25 @@ async def get_servicos():
     JOIN coordenacao c ON c.id = s.coordenacao_id
     ORDER BY c.nome, s.nome
     '''
-    try:
-        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
-        if not resultado:
-            return []
-        grupos = {}
-        for r in resultado:
-            cid = r['coordenacao_id']
-            if cid not in grupos:
-                grupos[cid] = {
-                    'coordenacao_id': cid,
-                    'coordenacao_nome': r['coordenacao_nome'],
-                    'coordenacao_sigla': r['coordenacao_sigla'],
-                    'servicos': []
-                }
-            grupos[cid]['servicos'].append({
-                'id': r['id'],
-                'nome': r['nome'],
-                'sigla': r['sigla']
-            })
-        return list(grupos.values())
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+    if not resultado:
+        return []
+    grupos = {}
+    for r in resultado:
+        cid = r['coordenacao_id']
+        if cid not in grupos:
+            grupos[cid] = {
+                'coordenacao_id': cid,
+                'coordenacao_nome': r['coordenacao_nome'],
+                'coordenacao_sigla': r['coordenacao_sigla'],
+                'servicos': []
+            }
+        grupos[cid]['servicos'].append({
+            'id': r['id'],
+            'nome': r['nome'],
+            'sigla': r['sigla']
+        })
+    return list(grupos.values())
 
 
 
@@ -1096,14 +1063,8 @@ async def get_membros():
       AND LOWER(c.nome) LIKE '%projeto%'
     ORDER BY m.nome
     '''
-    try:
-        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
-        return resultado or []
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+    return resultado or []
 
 
 @app.get('/api/membros-por-coordenacao', response_model=list[MembrosPorCoordenacao])
@@ -1116,44 +1077,38 @@ async def get_membros_por_coordenacao():
     LEFT JOIN coordenacao c ON c.id = mc.coordenacao_id
     ORDER BY c.nome, m.nome
     '''
-    try:
-        resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
-        grupos = {}
+    resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+    grupos = {}
+    
+    # Grupo inicial para membros sem coordenação cadastrada
+    grupos[0] = {
+        'coordenacao_id': 0,
+        'coordenacao_nome': 'Outros Departamentos / Presidência',
+        'coordenacao_sigla': 'OUTROS',
+        'membros': []
+    }
+    
+    for r in resultado:
+        membro_data = {'id': r['id'], 'nome': r['nome'], 'email': r['email']}
+        if r['coordenacao_id'] is not None:
+            cid = r['coordenacao_id']
+            if cid not in grupos:
+                grupos[cid] = {
+                    'coordenacao_id': cid,
+                    'coordenacao_nome': r['coordenacao_nome'],
+                    'coordenacao_sigla': r['coordenacao_sigla'],
+                    'membros': []
+                }
+            if membro_data not in grupos[cid]['membros']:
+                grupos[cid]['membros'].append(membro_data)
+        else:
+            if membro_data not in grupos[0]['membros']:
+                grupos[0]['membros'].append(membro_data)
+                
+    if not grupos[0]['membros']:
+        del grupos[0]
         
-        # Grupo inicial para membros sem coordenação cadastrada
-        grupos[0] = {
-            'coordenacao_id': 0,
-            'coordenacao_nome': 'Outros Departamentos / Presidência',
-            'coordenacao_sigla': 'OUTROS',
-            'membros': []
-        }
-        
-        for r in resultado:
-            membro_data = {'id': r['id'], 'nome': r['nome'], 'email': r['email']}
-            if r['coordenacao_id'] is not None:
-                cid = r['coordenacao_id']
-                if cid not in grupos:
-                    grupos[cid] = {
-                        'coordenacao_id': cid,
-                        'coordenacao_nome': r['coordenacao_nome'],
-                        'coordenacao_sigla': r['coordenacao_sigla'],
-                        'membros': []
-                    }
-                if membro_data not in grupos[cid]['membros']:
-                    grupos[cid]['membros'].append(membro_data)
-            else:
-                if membro_data not in grupos[0]['membros']:
-                    grupos[0]['membros'].append(membro_data)
-                    
-        if not grupos[0]['membros']:
-            del grupos[0]
-            
-        return list(grupos.values())
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    return list(grupos.values())
 
 
 
@@ -1233,42 +1188,36 @@ def _submit_pape_tx(data: PapeFormData) -> int:
 
 @app.post('/api/pape')
 async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
-    try:
-        is_project_manager = await validate_project_manager(
-            data.respondente_nome,
-            data.projeto_externo_id,
-        )
-        if not is_project_manager:
-            raise HTTPException(
-                status_code=400,
-                detail='Este projeto não está vinculado à gerente selecionada',
-            )
-
-        acomp_id = await asyncio.to_thread(_submit_pape_tx, data)
-
-        await update_project_orientador_if_unknown(
-            data.projeto_externo_id,
-            data.possui_orientador,
-            data.nome_orientador,
+    is_project_manager = await validate_project_manager(
+        data.respondente_nome,
+        data.projeto_externo_id,
+    )
+    if not is_project_manager:
+        raise HTTPException(
+            status_code=400,
+            detail='Este projeto não está vinculado à gerente selecionada',
         )
 
-        n8n_payload = {
-            'acompanhamento_id': acomp_id,
-            'data_resposta': datetime.now().isoformat(),
-            **data.model_dump(),
-        }
-        background_tasks.add_task(send_to_n8n, n8n_payload)
+    acomp_id = await asyncio.to_thread(_submit_pape_tx, data)
 
-        return {
-            'success': True,
-            'message': 'Formulário enviado com sucesso',
-            'acompanhamento_id': acomp_id,
-        }
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception('Erro ao submeter PAPE')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+    await update_project_orientador_if_unknown(
+        data.projeto_externo_id,
+        data.possui_orientador,
+        data.nome_orientador,
+    )
+
+    n8n_payload = {
+        'acompanhamento_id': acomp_id,
+        'data_resposta': datetime.now().isoformat(),
+        **data.model_dump(),
+    }
+    background_tasks.add_task(send_to_n8n, n8n_payload)
+
+    return {
+        'success': True,
+        'message': 'Formulário enviado com sucesso',
+        'acompanhamento_id': acomp_id,
+    }
 
 
 @app.get('/api/dashboard/pape')
@@ -1577,8 +1526,7 @@ async def get_dashboard_pape(
             'datas_disponiveis': datas_disponiveis,
         }
     except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+        raise
 
 
 def parse_valor_projeto(valor_str: str | None) -> float:
@@ -1657,12 +1605,8 @@ async def create_projeto(data: ProjetoCreate, _auth: None = Depends(require_admi
             raise
 
         return {'success': True, 'projeto_id': projeto_id}
-
-    except HTTPException:
-        raise
     except Exception:
-        logger.exception('Erro interno')
-        raise HTTPException(status_code=500, detail='Erro interno do servidor')
+        raise
 
 
 async def _create_projeto_relations(projeto_id: int, data: ProjetoCreate, data_inicio: str | None) -> None:
