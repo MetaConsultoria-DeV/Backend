@@ -1682,60 +1682,16 @@ async def create_projeto(data: ProjetoCreate):
         if not projeto_id:
             raise Exception('Falha ao criar projeto_externo')
 
-        # 2. Criar contrato (apenas se houver cliente cadastrado)
-        cliente = await asyncio.to_thread(execute_query, 'SELECT id FROM cliente LIMIT 1', fetch_one=True)
-        if cliente:
-            numero = data.numero_contrato.strip() if data.numero_contrato else f'CONTRATO-TEMP-{projeto_id}'
-            valor = parse_valor_projeto(data.valor_projeto)
-            await asyncio.to_thread(
-                execute_insert,
-                'INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total) VALUES (%s, %s, %s, %s)',
-                (cliente['id'], projeto_id, numero, valor),
-            )
-
-        # 3. Vincular serviços
-        for servico_id in (data.servicos_projeto or []):
+        try:
+            await _create_projeto_relations(projeto_id, data, data_inicio)
+        except Exception:
+            # Desfaz o projeto para evitar registro órfão
             await asyncio.to_thread(
                 execute_query,
-                'INSERT IGNORE INTO projeto_servico (projeto_externo_id, servico_id) VALUES (%s, %s)',
-                (projeto_id, servico_id),
+                'DELETE FROM projeto_externo WHERE id = %s',
+                (projeto_id,),
             )
-
-        # 4. Vincular consultores — cargo vem de membro_cargo (10 ou 11), default 10
-        for chave in (data.membros_projeto or []):
-            partes = chave.split('-')
-            if len(partes) != 2:
-                continue
-            try:
-                membro_id = int(partes[0])
-                coordenacao_id = int(partes[1])
-            except ValueError:
-                continue
-            cargo_id = await get_cargo_consultor_do_membro(membro_id)
-            await asyncio.to_thread(
-                execute_query,
-                '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
-                   VALUES (%s, %s, %s, %s, %s)''',
-                (membro_id, projeto_id, coordenacao_id, cargo_id, data_inicio),
-            )
-
-        # 5. Vincular gerente — cargo_id 31 (Gerente de Projeto)
-        if data.gerente_projeto:
-            gerente = await asyncio.to_thread(
-                execute_query,
-                'SELECT id FROM membro WHERE nome = %s LIMIT 1',
-                (data.gerente_projeto,),
-                fetch_one=True,
-            )
-            if gerente:
-                coordenacao_id = await get_coordenacao_do_membro(gerente['id'])
-                if coordenacao_id:
-                    await asyncio.to_thread(
-                        execute_query,
-                        '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
-                           VALUES (%s, %s, %s, %s, %s)''',
-                        (gerente['id'], projeto_id, coordenacao_id, 31, data_inicio),
-                    )
+            raise
 
         return {'success': True, 'projeto_id': projeto_id}
 
@@ -1743,6 +1699,68 @@ async def create_projeto(data: ProjetoCreate):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _create_projeto_relations(projeto_id: int, data: ProjetoCreate, data_inicio: str | None) -> None:
+    # 2. Criar contrato (apenas se houver cliente cadastrado)
+    cliente = await asyncio.to_thread(execute_query, 'SELECT id FROM cliente LIMIT 1', fetch_one=True)
+    if cliente:
+        numero = data.numero_contrato.strip() if data.numero_contrato else f'CONTRATO-TEMP-{projeto_id}'
+        valor = parse_valor_projeto(data.valor_projeto)
+        await asyncio.to_thread(
+            execute_insert,
+            'INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total) VALUES (%s, %s, %s, %s)',
+            (cliente['id'], projeto_id, numero, valor),
+        )
+
+    # 3. Vincular serviços
+    for servico_id in (data.servicos_projeto or []):
+        await asyncio.to_thread(
+            execute_query,
+            'INSERT IGNORE INTO projeto_servico (projeto_externo_id, servico_id) VALUES (%s, %s)',
+            (projeto_id, servico_id),
+        )
+
+    # 4. Vincular consultores — cargo vem de membro_cargo (10 ou 11), default 10
+    for chave in (data.membros_projeto or []):
+        partes = chave.split('-')
+        if len(partes) != 2:
+            continue
+        try:
+            membro_id = int(partes[0])
+            coordenacao_id = int(partes[1])
+        except ValueError:
+            continue
+        # coordenacao_id=0 é o placeholder para "Outros Departamentos" — busca a real
+        if coordenacao_id == 0:
+            coordenacao_id = await get_coordenacao_do_membro(membro_id)
+            if coordenacao_id is None:
+                continue
+        cargo_id = await get_cargo_consultor_do_membro(membro_id)
+        await asyncio.to_thread(
+            execute_query,
+            '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
+               VALUES (%s, %s, %s, %s, %s)''',
+            (membro_id, projeto_id, coordenacao_id, cargo_id, data_inicio),
+        )
+
+    # 5. Vincular gerente — cargo_id 31 (Gerente de Projeto)
+    if data.gerente_projeto:
+        gerente = await asyncio.to_thread(
+            execute_query,
+            'SELECT id FROM membro WHERE nome = %s LIMIT 1',
+            (data.gerente_projeto,),
+            fetch_one=True,
+        )
+        if gerente:
+            coordenacao_id = await get_coordenacao_do_membro(gerente['id'])
+            if coordenacao_id:
+                await asyncio.to_thread(
+                    execute_query,
+                    '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
+                       VALUES (%s, %s, %s, %s, %s)''',
+                    (gerente['id'], projeto_id, coordenacao_id, 31, data_inicio),
+                )
 
 
 if __name__ == '__main__':
