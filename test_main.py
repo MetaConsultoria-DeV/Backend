@@ -884,6 +884,21 @@ class SubmitPapeTransactionTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+
+class LifespanTest(unittest.TestCase):
+    def test_lifespan_inits_pool_on_startup_and_clears_on_shutdown(self):
+        sys.modules.pop('main', None)
+        sys.modules.pop('database', None)
+        with patch('mysql.connector.pooling.MySQLConnectionPool') as PoolCls:
+            database = importlib.import_module('database')
+            main = importlib.import_module('main')
+            # Pool ainda não criado só por importar (init agora é no lifespan)
+            self.assertIsNone(database._pool)
+            with TestClient(main.app):  # dispara startup + shutdown
+                PoolCls.assert_called_once()
+            self.assertIsNone(database._pool)  # fechado no shutdown
+
+
 if __name__ == '__main__':
     unittest.main()
 

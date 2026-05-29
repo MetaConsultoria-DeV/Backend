@@ -5,8 +5,9 @@ import asyncio
 import httpx
 import json
 import secrets
+from contextlib import asynccontextmanager
 from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao, ProjetoUpdate, ProjetoCreate
-from database import execute_query, execute_insert, transaction
+from database import execute_query, execute_insert, transaction, init_pool, close_pool
 
 import os
 from dotenv import load_dotenv
@@ -18,7 +19,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('pape')
 
 
-app = FastAPI(title='PAPE API', version='1.0.0')
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_pool()
+    yield
+    close_pool()
+
+
+app = FastAPI(title='PAPE API', version='1.0.0', lifespan=lifespan)
 
 ALLOWED_ORIGINS = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
 

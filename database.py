@@ -18,18 +18,33 @@ DB_PASSWORD = os.getenv('DB_PASSWORD', '')
 DB_NAME = os.getenv('DB_NAME', 'banco_de_dados')
 DB_PORT = int(os.getenv('DB_PORT', 3306))
 
-_pool = MySQLConnectionPool(
-    pool_name='pape_pool',
-    pool_size=5,
-    host=DB_HOST,
-    user=DB_USER,
-    password=DB_PASSWORD,
-    database=DB_NAME,
-    port=DB_PORT,
-)
+_pool = None
+
+
+def init_pool():
+    global _pool
+    if _pool is None:
+        _pool = MySQLConnectionPool(
+            pool_name='pape_pool',
+            pool_size=int(os.getenv('DB_POOL_SIZE', 5)),
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            port=DB_PORT,
+        )
+    return _pool
+
+
+def close_pool():
+    # mysql-connector não expõe close() do pool; soltar a referência libera as conexões.
+    global _pool
+    _pool = None
 
 
 def get_db_connection():
+    if _pool is None:
+        init_pool()
     return _pool.get_connection()
 
 
