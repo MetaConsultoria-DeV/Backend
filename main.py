@@ -1653,6 +1653,20 @@ async def get_coordenacao_do_membro(membro_id: int) -> int | None:
 @app.post('/api/projetos')
 async def create_projeto(data: ProjetoCreate):
     try:
+        # Validar número de contrato antes de qualquer INSERT
+        if data.numero_contrato and data.numero_contrato.strip():
+            existing = await asyncio.to_thread(
+                execute_query,
+                'SELECT id FROM contrato WHERE numero = %s LIMIT 1',
+                (data.numero_contrato.strip(),),
+                fetch_one=True,
+            )
+            if existing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f'Número de contrato "{data.numero_contrato.strip()}" já está cadastrado. Use um número diferente.',
+                )
+
         # 1. Criar projeto_externo
         possui_orientador_value = 1 if data.possui_orientador == 'Sim' else 0
         nome_orientador_value = data.nome_orientador if possui_orientador_value else None
