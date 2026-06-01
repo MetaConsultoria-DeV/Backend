@@ -85,7 +85,7 @@ async def get_projetos(gerente_id: int | None = None):
 
     query = '''
     SELECT pe.id, pe.nome, c.numero as numero_contrato, c.valor_total,
-           pe.possui_orientador, pe.nome_orientador
+           pe.possui_orientador, pe.nome_orientador, pe.status
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
     WHERE (
@@ -112,9 +112,7 @@ async def get_all_projetos():
         pe.id, 
         pe.nome, 
         c.numero as numero_contrato,
-        c.finalizado_em,
-        c.fase_atual,
-        pe.descricao,
+        pe.status,
         (
             SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
             FROM membro_projeto mp
@@ -124,14 +122,7 @@ async def get_all_projetos():
               AND mp.data_saida IS NULL
               AND LOWER(cg.nome) LIKE '%gerente%'
               AND LOWER(cg.nome) LIKE '%projeto%'
-        ) as gerente,
-        (
-            SELECT ap.status_cronograma
-            FROM acompanhamento_projeto ap
-            WHERE ap.projeto_externo_id = pe.id
-            ORDER BY ap.data_resposta DESC, ap.id DESC
-            LIMIT 1
-        ) as status_cronograma
+        ) as gerente
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
     ORDER BY pe.nome
@@ -142,27 +133,12 @@ async def get_all_projetos():
     
     projetos = []
     for r in resultado:
-        status = 'ativo'
-        # 1. Finalizado
-        if (
-            r.get('finalizado_em') is not None or 
-            r.get('fase_atual') in ('Concluido', 'Cancelado') or
-            r.get('status_cronograma') == 'Concluido'
-        ):
-            status = 'finalizado'
-        # 2. Pausado
-        elif (
-            (r.get('descricao') and 'pausado' in r.get('descricao').lower()) or
-            r.get('fase_atual') == 'Pausado'
-        ):
-            status = 'pausado'
-        
         projetos.append({
             'id': r['id'],
             'nome': r['nome'],
             'numero_contrato': r['numero_contrato'] if r['numero_contrato'] and not r['numero_contrato'].startswith('CONTRATO-TEMP') else None,
             'gerente': r['gerente'] or 'Sem gerente',
-            'status': status
+            'status': r['status']
         })
     return projetos
 
@@ -857,7 +833,7 @@ def build_detalhe_dashboard(rows: list[dict], selected_project_id: int | None = 
 async def get_projeto_detalhes(projeto_id: int):
     query = '''
     SELECT pe.id, pe.nome, pe.descricao, pe.descricao_projeto, pe.data_inicio, c.numero as numero_contrato,
-           c.valor_total, pe.possui_orientador, pe.nome_orientador
+           c.valor_total, pe.possui_orientador, pe.nome_orientador, pe.status
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
     WHERE pe.id = %s
@@ -936,16 +912,18 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
         descricao_projeto = %s,
         data_inicio = %s,
         possui_orientador = %s,
-        nome_orientador = %s
+        nome_orientador = %s,
+        status = %s
     WHERE id = %s
     '''
     data_inicio = data.data_inicio if data.data_inicio else None
     nome_orientador = data.nome_orientador if data.possui_orientador == 1 else None
+    status_val = data.status if data.status else 'ativo'
 
     await asyncio.to_thread(
         execute_query,
         update_pe_query,
-        (data.nome, data.descricao_projeto, data_inicio, data.possui_orientador, nome_orientador, projeto_id)
+        (data.nome, data.descricao_projeto, data_inicio, data.possui_orientador, nome_orientador, status_val, projeto_id)
     )
 
     contract_query = 'SELECT id FROM contrato WHERE projeto_externo_id = %s'

@@ -164,6 +164,7 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
                 'valor_total': None,
                 'possui_orientador': None,
                 'nome_orientador': None,
+                'status': 'ativo',
             },
         ]
 

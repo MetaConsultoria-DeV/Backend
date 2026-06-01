@@ -10,6 +10,7 @@ class Projeto(BaseModel):
     valor_total: Optional[float] = None
     possui_orientador: Optional[bool] = None
     nome_orientador: Optional[str] = None
+    status: Literal['ativo', 'finalizado', 'pausado'] = 'ativo'
 
 
 class ProjetoListItem(BaseModel):
@@ -117,6 +118,7 @@ class ProjetoUpdate(BaseModel):
     valor_total: Optional[float] = None
     possui_orientador: Optional[int] = None
     nome_orientador: Optional[str] = None
+    status: Optional[Literal['ativo', 'finalizado', 'pausado']] = None
 
 
 class ProjetoCreate(BaseModel):
