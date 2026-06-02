@@ -14,7 +14,10 @@ import os
 from dotenv import load_dotenv
 import logging
 
-load_dotenv()
+# Garante que carrega o arquivo .env do diretório onde o script está localizado
+base_dir = os.path.dirname(os.path.abspath(__file__))
+dotenv_path = os.path.join(base_dir, '.env')
+load_dotenv(dotenv_path)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('pape')

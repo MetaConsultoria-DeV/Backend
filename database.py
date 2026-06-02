@@ -10,7 +10,10 @@ from contextlib import contextmanager
 logger = logging.getLogger('pape.db')
 
 
-load_dotenv()
+# Garante que carrega o arquivo .env do diretório onde o script está localizado
+base_dir = os.path.dirname(os.path.abspath(__file__))
+dotenv_path = os.path.join(base_dir, '.env')
+load_dotenv(dotenv_path)
 
 DB_HOST = os.getenv('DB_HOST', 'localhost')
 DB_USER = os.getenv('DB_USER', 'root')
