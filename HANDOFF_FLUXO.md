@@ -6,9 +6,9 @@
 
 ## Endpoint de sync
 - **Método/rota:** `POST /internal/sync/pipefy-financeiro`
-- **URL base:** `<preencher>`
-  - Local: `http://localhost:8000` (porta padrão do uvicorn)
-  - Produção: `https://<preencher-host-do-backend>`
+- **URL base (produção):** `https://banco-de-dados-backend.d86ysa.easypanel.host`
+  - Local (dev): `http://localhost:8000`
+  - Chamada completa: `POST https://banco-de-dados-backend.d86ysa.easypanel.host/internal/sync/pipefy-financeiro`
 - **Querystring opcional:** `?dry_run=true` → executa tudo mas **não grava** (só loga). Útil pra teste.
 
 ## Autenticação
@@ -43,5 +43,6 @@
 ## Observações pro agent do fluxo
 - O **token do Pipefy NÃO é necessário no n8n** — fica só no backend (`PIPEFY_TOKEN`).
 - Credencial **Microsoft Graph já existe** no n8n do Davi; reusar pra notificação de erro/resumo.
-- **Frequência sugerida do Schedule:** `<preencher>` (ex.: diária às 6h; o sync é idempotente, pode rodar quantas vezes quiser).
+- **Frequência sugerida do Schedule:** diária às 6h (o sync é idempotente, pode rodar quantas vezes quiser; ajuste se quiser mais/menos frequente).
+- **Endpoint é público** (atrás do domínio do EasyPanel), protegido só pelo `X-Internal-Token`. O n8n chama a URL pública direto — não precisa estar na mesma rede.
 - Em caso de `para_revisao` não-vazio, vale incluir os card_ids na notificação pra revisão manual das parcelas variáveis.
