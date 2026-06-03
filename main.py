@@ -9,6 +9,7 @@ import secrets
 from contextlib import asynccontextmanager
 from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao, ProjetoUpdate, ProjetoCreate
 from database import execute_query, execute_insert, transaction, init_pool, close_pool
+from ingestion.router import router as ingestion_router
 
 import os
 from dotenv import load_dotenv
@@ -46,6 +47,9 @@ app.add_middleware(
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception('Erro não tratado em %s', request.url.path)
     return JSONResponse(status_code=500, content={'detail': 'Erro interno do servidor'})
+
+# Ingestão Pipefy Financeiro — POST /internal/sync/pipefy-financeiro
+app.include_router(ingestion_router)
 
 N8N_WEBHOOK_URL = os.getenv('N8N_WEBHOOK_URL', 'http://localhost:5678/webhook/pape')
 ADMIN_API_TOKEN = os.getenv('ADMIN_API_TOKEN', '')
