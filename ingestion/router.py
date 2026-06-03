@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from .pipefy.sync import run_sync
+from .pipefy_comercial.sync import run_sync as run_sync_comercial
 
 logger = logging.getLogger("ingestion.router")
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -39,6 +40,29 @@ def sync_pipefy_financeiro(
     status_code = 200
     if resultado["erros"]:
         status_code = 207  # Multi-Status — parcialmente bem-sucedido
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=status_code, content=resultado)
+
+
+@router.post("/sync/pipefy-comercial")
+def sync_pipefy_comercial(
+    dry_run: bool = Query(default=False, description="Se true, não grava no banco"),
+    x_internal_token: str | None = Header(default=None),
+):
+    """
+    Dispara a sincronização Pipefy de Vendas (Sales Pipeline) → MySQL comercial.
+
+    - Exige header `X-Internal-Token` igual a `INTERNAL_SYNC_TOKEN` no .env.
+    - `?dry_run=true` roda tudo sem gravar (ideal para validação).
+    """
+    _check_token(x_internal_token)
+
+    logger.info("Iniciando sync Pipefy Comercial (dry_run=%s)", dry_run)
+    resultado = run_sync_comercial(dry_run=dry_run)
+    logger.info("Sync comercial concluído: %s", resultado)
+
+    status_code = 207 if resultado["erros"] else 200
 
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=status_code, content=resultado)

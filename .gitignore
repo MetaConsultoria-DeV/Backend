@@ -6,3 +6,8 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+
+# Planilhas com dados de cliente (PII) e prints de trabalho — nunca versionar
+*.xlsx
+*.xls
+image.png
