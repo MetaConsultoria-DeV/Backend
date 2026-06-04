@@ -133,6 +133,26 @@ def upsert_contrato(c: dict) -> tuple[int, bool]:
     return row["id"], inserido
 
 
+def atualizar_fase_contrato(contrato_id: int, fase_atual, data_inicio_pagamento, finalizado_em) -> None:
+    """Atualiza SÓ os sinais operacionais do Pipefy num contrato que JÁ existe.
+
+    Não toca em numero, projeto_externo_id, cliente_id, valor, parcelas nem nas chaves
+    externas — esses são dados que o Davi cura à mão. Serve para o bot manter a fase em
+    dia sem duplicar nem reapontar contratos existentes. Timestamps só preenchem se
+    vierem (COALESCE), nunca apagam o que já está.
+    """
+    execute_query(
+        """
+        UPDATE contrato SET
+            fase_atual            = %s,
+            data_inicio_pagamento = COALESCE(%s, data_inicio_pagamento),
+            finalizado_em         = COALESCE(%s, finalizado_em)
+        WHERE id = %s
+        """,
+        (fase_atual, data_inicio_pagamento, finalizado_em, contrato_id),
+    )
+
+
 def upsert_contrato_pagamento(p: dict) -> None:
     """Upsert por (external_source, external_id)."""
     execute_query(

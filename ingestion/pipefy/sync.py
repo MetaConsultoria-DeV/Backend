@@ -5,9 +5,10 @@ from typing import Optional
 
 from .client import fetch_all_cards
 from .transform import transform_card
+from .matching import resolve_contrato_por_numero
 from .load import (
     upsert_forma_pagamento, upsert_cliente, upsert_projeto_externo,
-    upsert_contrato, upsert_contrato_pagamento,
+    upsert_contrato, upsert_contrato_pagamento, atualizar_fase_contrato,
 )
 
 logger = logging.getLogger("ingestion.pipefy.sync")
@@ -64,6 +65,27 @@ def run_sync(dry_run: bool = False) -> dict:
                     len(result["parcelas"]),
                 )
                 # Em dry-run não consultamos o banco; contamos tudo como "lido".
+                continue
+
+            # ── 0. Já existe contrato com esse número? ───────────────────────
+            # Decisão do Davi: o bot NÃO duplica. Se o número do contrato já está
+            # no banco (curado à mão ou vindo do Excel), reusa o projeto/contrato
+            # existentes e atualiza só a fase do Pipefy — sem criar projeto novo,
+            # sem reapontar o contrato, sem mexer em valor/parcelas/nome.
+            contrato = result["contrato"]
+            existente = resolve_contrato_por_numero(contrato["numero"])
+            if existente:
+                atualizar_fase_contrato(
+                    existente["id"],
+                    contrato.get("fase_atual"),
+                    contrato.get("data_inicio_pagamento"),
+                    contrato.get("finalizado_em"),
+                )
+                atualizados += 1
+                logger.info(
+                    "Card %s: contrato %s já existe (projeto %s) — só atualizei a fase, sem duplicar",
+                    card_id, contrato["numero"], existente["projeto_externo_id"],
+                )
                 continue
 
             # ── 1. forma_pagamento ──────────────────────────────────────────
