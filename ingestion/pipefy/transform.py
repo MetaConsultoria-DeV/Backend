@@ -250,6 +250,7 @@ def transform_card(card: dict) -> dict:
 
     return {
         "card_id":        card_id,
+        "codigo":         codigo,   # None se o título não tem NNN.YYYY → sync ignora o card
         "forma_pagamento": forma_pagamento,
         "cliente":        cliente,
         "projeto_externo": projeto_externo,

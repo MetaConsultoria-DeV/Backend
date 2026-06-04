@@ -74,6 +74,9 @@ def test_transform_card_basic():
     assert result["cliente"]["cpf_cnpj"] is None  # campo vazio no fixture
     assert result["cliente"]["external_source"] == "pipefy_financeiro"
 
+    # código extraído do título (chave do filtro no sync)
+    assert result["codigo"] == "008.2026"
+
     # projeto_externo
     assert result["projeto_externo"]["external_id"] == "008.2026"
     assert "Legaliza" in result["projeto_externo"]["nome"]
@@ -124,13 +127,13 @@ def test_valor_variavel_para_revisao():
     assert result["parcelas"] == []  # não gera parcelas
 
 
-def test_sem_codigo_no_titulo_fallback():
+def test_sem_codigo_no_titulo_e_ignorado_pelo_sync():
+    """Título sem NNN.YYYY → codigo=None. O sync usa isso pra descartar o card
+    (não grava nada). O transform ainda calcula um placeholder, mas ele nunca
+    é persistido porque o sync ignora o card antes do load."""
     card = _base_card(title="OP.MPR-26.1-015 Quanta Musical")
     result = transform_card(card)
-    # Sem código → numero = FIN-{card_id}
-    assert result["contrato"]["numero"] == f"FIN-{card['id']}"
-    # external_id do projeto = card_id como fallback
-    assert result["projeto_externo"]["external_id"] == card["id"]
+    assert result["codigo"] is None
 
 
 def test_data_inicio_pagamento():

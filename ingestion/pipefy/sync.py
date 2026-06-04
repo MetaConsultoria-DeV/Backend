@@ -23,6 +23,7 @@ def run_sync(dry_run: bool = False) -> dict:
     Returns:
         {
           "lidos": int,
+          "ignorados": int,            # cards sem código de contrato no título (não entram)
           "inseridos": int,
           "atualizados": int,
           "para_revisao": list[str],   # card_ids com valor variável
@@ -30,6 +31,7 @@ def run_sync(dry_run: bool = False) -> dict:
         }
     """
     lidos = 0
+    ignorados = 0
     inseridos = 0
     atualizados = 0
     para_revisao = []
@@ -40,6 +42,14 @@ def run_sync(dry_run: bool = False) -> dict:
         card_id = card.get("id", "?")
         try:
             result = transform_card(card)
+
+            # ── Filtro: sem código de contrato (NNN.YYYY) no título → não entra ──
+            # Decisão do Davi: card sem código não vira contrato. Nada é gravado
+            # (cliente/projeto/contrato/parcela). Não é erro, é descarte proposital.
+            if not result["codigo"]:
+                ignorados += 1
+                logger.info("Card %s ignorado: título sem código de contrato (NNN.YYYY)", card_id)
+                continue
 
             if result["para_revisao"]:
                 para_revisao.append(card_id)
@@ -90,6 +100,7 @@ def run_sync(dry_run: bool = False) -> dict:
 
     return {
         "lidos":        lidos,
+        "ignorados":    ignorados,
         "inseridos":    inseridos,
         "atualizados":  atualizados,
         "para_revisao": para_revisao,
