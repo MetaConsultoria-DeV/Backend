@@ -10,4 +10,9 @@ venv/
 # Planilhas com dados de cliente (PII) e prints de trabalho — nunca versionar
 *.xlsx
 *.xls
+*.xlsm
+*.xlsb
 image.png
+
+# Workflows do n8n — mantidos localmente, não versionados (convenção do repo)
+*.n8n.json
