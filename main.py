@@ -968,23 +968,47 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
 
 
 def _delete_projeto_tx(projeto_id: int) -> bool:
-    """Apaga o projeto e todas as dependências numa única transação. Retorna False se não existe."""
+    """Apaga o projeto e todas as dependências numa única transação. Retorna False se não existe.
+
+    Importante: acompanhamento_projeto e contrato_pagamento referenciam o contrato
+    via contrato_id (FK RESTRICT, NOT NULL). Por inconsistências de dados (ex.: um
+    contrato que migrou de projeto), pode existir uma linha ligada ao contrato deste
+    projeto mas com projeto_externo_id de OUTRO projeto. Por isso a limpeza é feita
+    por projeto_externo_id OU pelos contratos do projeto (contrato_id IN ...), senão
+    o DELETE FROM contrato falha com erro 1451 (fk_acomp_contrato / fk_cp_contrato).
+    """
     with transaction() as conn:
         cur = conn.cursor()
         cur.execute('SELECT id FROM projeto_externo WHERE id = %s', (projeto_id,))
         if not cur.fetchone():
             return False
+        # Solta transações que apontam para pagamentos deste projeto (por projeto OU por contrato)
         cur.execute(
             '''UPDATE transacao SET contrato_pagamento_id = NULL
                WHERE contrato_pagamento_id IN (
-                   SELECT id FROM contrato_pagamento WHERE projeto_externo_id = %s)''',
-            (projeto_id,),
+                   SELECT id FROM contrato_pagamento
+                   WHERE projeto_externo_id = %s
+                      OR contrato_id IN (SELECT id FROM contrato WHERE projeto_externo_id = %s))''',
+            (projeto_id, projeto_id),
         )
         cur.execute('UPDATE transacao SET projeto_externo_id = NULL WHERE projeto_externo_id = %s', (projeto_id,))
-        cur.execute('DELETE FROM contrato_pagamento WHERE projeto_externo_id = %s', (projeto_id,))
-        cur.execute('DELETE FROM acompanhamento_projeto WHERE projeto_externo_id = %s', (projeto_id,))
+        # Filhos do contrato (RESTRICT): apagar por projeto OU pelos contratos do projeto
+        cur.execute(
+            '''DELETE FROM acompanhamento_projeto
+               WHERE projeto_externo_id = %s
+                  OR contrato_id IN (SELECT id FROM contrato WHERE projeto_externo_id = %s)''',
+            (projeto_id, projeto_id),
+        )
+        cur.execute(
+            '''DELETE FROM contrato_pagamento
+               WHERE projeto_externo_id = %s
+                  OR contrato_id IN (SELECT id FROM contrato WHERE projeto_externo_id = %s)''',
+            (projeto_id, projeto_id),
+        )
+        # Filhos diretos do projeto
         cur.execute('DELETE FROM membro_projeto WHERE projeto_externo_id = %s', (projeto_id,))
         cur.execute('DELETE FROM projeto_servico WHERE projeto_externo_id = %s', (projeto_id,))
+        # Agora o contrato e o projeto
         cur.execute('DELETE FROM contrato WHERE projeto_externo_id = %s', (projeto_id,))
         cur.execute('DELETE FROM projeto_externo WHERE id = %s', (projeto_id,))
         return True
