@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from models import Projeto, Coordenacao, Membro, PapeFormData, ProjetoListItem, Servico, ServicosPorCoordenacao, MembrosPorCoordenacao, ProjetoUpdate, ProjetoCreate
 from database import execute_query, execute_insert, transaction, init_pool, close_pool
 from ingestion.router import router as ingestion_router
+from routers.bdu import router as bdu_router
 
 import os
 from dotenv import load_dotenv
@@ -50,6 +51,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 # Ingestão Pipefy Financeiro — POST /internal/sync/pipefy-financeiro
 app.include_router(ingestion_router)
+# Endpoints read-only do BDU (frontend Next.js) — GET /api/bdu/*
+app.include_router(bdu_router)
 
 N8N_WEBHOOK_URL = os.getenv('N8N_WEBHOOK_URL', 'http://localhost:5678/webhook/pape')
 ADMIN_API_TOKEN = os.getenv('ADMIN_API_TOKEN', '')
