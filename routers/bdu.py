@@ -307,8 +307,14 @@ async def get_servicos_portfolio():
 @router.get("/transversais/facts")
 async def get_transversais_facts():
     """
-    "Fatos" projeto × membro × serviço × coordenação × cliente × valor.
+    "Fatos" projeto × membro × cargo × coordenação × célula × cliente × valor.
     O frontend agrega livremente (A × B × métrica), evitando lógica pesada no backend.
+
+    Dimensões escolhidas pelo que está populado no banco (contexto-banco-agent):
+    - `projeto_servico` está vazia → serviço não é dimensão viável.
+    - As 5 coordenações pertencem à mesma célula → célula vem do membro
+      (membro_celula), não da coordenação.
+    - `membro_projeto.cargo_id` e `coordenacao_id` estão 100% preenchidos.
     """
     return await _q(
         """
@@ -319,18 +325,18 @@ async def get_transversais_facts():
           COALESCE(c.valor_total, 0) AS valor,
           m.id AS membro_id, m.nome AS membro,
           co.nome AS coordenacao, co.sigla AS coordenacao_sigla,
-          cli.nome AS cliente,
-          s.nome AS servico,
-          cel.nome AS celula
+          ca.nome AS cargo,
+          cel.nome AS celula,
+          cli.nome AS cliente
         FROM projeto_externo pe
         LEFT JOIN membro_projeto mp ON pe.id = mp.projeto_externo_id
         LEFT JOIN membro m ON m.id = mp.membro_id
         LEFT JOIN coordenacao co ON co.id = mp.coordenacao_id
-        LEFT JOIN celula cel ON cel.id = co.celula_id
+        LEFT JOIN cargo ca ON ca.id = mp.cargo_id
+        LEFT JOIN membro_celula mc ON mc.membro_id = m.id
+        LEFT JOIN celula cel ON cel.id = mc.celula_id
         LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
         LEFT JOIN cliente cli ON cli.id = c.cliente_id
-        LEFT JOIN projeto_servico ps ON ps.projeto_externo_id = pe.id
-        LEFT JOIN servico s ON s.id = ps.servico_id
         ORDER BY pe.nome
         """
     )
