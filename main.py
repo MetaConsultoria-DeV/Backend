@@ -929,6 +929,22 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
     if not exists:
         raise HTTPException(status_code=404, detail='Projeto não encontrado')
 
+    # Número de contrato é UNIQUE global: se já pertence a OUTRO projeto, avisa
+    # em vez de estourar erro 500 na constraint.
+    numero_informado = (data.numero_contrato or '').strip()
+    if numero_informado:
+        dono = await asyncio.to_thread(
+            execute_query,
+            'SELECT projeto_externo_id FROM contrato WHERE numero = %s LIMIT 1',
+            (numero_informado,),
+            fetch_one=True,
+        )
+        if dono and dono['projeto_externo_id'] != projeto_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f'Número de contrato "{numero_informado}" já pertence a outro projeto.',
+            )
+
     update_pe_query = '''
     UPDATE projeto_externo
     SET nome = %s,
@@ -953,21 +969,23 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
     contract = await asyncio.to_thread(execute_query, contract_query, (projeto_id,), fetch_one=True)
 
     if contract:
+        # Campo vazio no form NÃO apaga: editar um projeto sem preencher número/valor
+        # zerava o contrato sincronizado do Pipefy (valor_total = 0, numero = '').
+        numero_novo = (data.numero_contrato or '').strip()
         update_c_query = '''
         UPDATE contrato
-        SET numero = %s,
-            valor_total = %s
+        SET numero = CASE WHEN %s = '' THEN numero ELSE %s END,
+            valor_total = COALESCE(%s, valor_total)
         WHERE projeto_externo_id = %s
         '''
         await asyncio.to_thread(
             execute_query,
             update_c_query,
-            (data.numero_contrato or '', data.valor_total or 0.0, projeto_id)
+            (numero_novo, numero_novo, data.valor_total, projeto_id)
         )
     elif data.numero_contrato or data.valor_total:
-        client_query = 'SELECT id FROM cliente LIMIT 1'
-        client = await asyncio.to_thread(execute_query, client_query, fetch_one=True)
-        client_id = client['id'] if client else 1
+        client_id = await get_cliente_placeholder()
+        numero = (data.numero_contrato or '').strip() or f'CONTRATO-TEMP-{projeto_id}'
 
         insert_c_query = '''
         INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total)
@@ -976,7 +994,7 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
         await asyncio.to_thread(
             execute_query,
             insert_c_query,
-            (client_id, projeto_id, data.numero_contrato or '', data.valor_total or 0.0)
+            (client_id, projeto_id, numero, data.valor_total or 0.0)
         )
 
     if data.servicos_projeto is not None:
@@ -1620,6 +1638,31 @@ async def get_coordenacao_do_membro(membro_id: int) -> int | None:
     return result['coordenacao_id'] if result else None
 
 
+async def get_cliente_placeholder() -> int:
+    """Cliente neutro para contratos criados pelo app sem cliente definido.
+
+    Antes era `SELECT id FROM cliente LIMIT 1`: um cliente real arbitrário (o
+    primeiro da tabela) virava dono de todos os contratos criados pelo form. O
+    sync do Pipefy troca pelo cliente verdadeiro quando o card chega.
+    """
+    row = await asyncio.to_thread(
+        execute_query,
+        'SELECT id FROM cliente WHERE nome = %s LIMIT 1',
+        ('Cliente não informado',),
+        fetch_one=True,
+    )
+    if row:
+        return row['id']
+    novo = await asyncio.to_thread(
+        execute_insert,
+        'INSERT INTO cliente (nome) VALUES (%s)',
+        ('Cliente não informado',),
+    )
+    if not novo:
+        raise Exception('Falha ao criar cliente placeholder')
+    return novo
+
+
 @app.post('/api/projetos')
 async def create_projeto(data: ProjetoCreate, _auth: None = Depends(require_admin_token)):
     try:
@@ -1669,16 +1712,15 @@ async def create_projeto(data: ProjetoCreate, _auth: None = Depends(require_admi
 
 
 async def _create_projeto_relations(projeto_id: int, data: ProjetoCreate, data_inicio: str | None) -> None:
-    # 2. Criar contrato (apenas se houver cliente cadastrado)
-    cliente = await asyncio.to_thread(execute_query, 'SELECT id FROM cliente LIMIT 1', fetch_one=True)
-    if cliente:
-        numero = data.numero_contrato.strip() if data.numero_contrato else f'CONTRATO-TEMP-{projeto_id}'
-        valor = parse_valor_projeto(data.valor_projeto)
-        await asyncio.to_thread(
-            execute_insert,
-            'INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total) VALUES (%s, %s, %s, %s)',
-            (cliente['id'], projeto_id, numero, valor),
-        )
+    # 2. Criar contrato com cliente placeholder (o sync do Pipefy completa depois)
+    cliente_id = await get_cliente_placeholder()
+    numero = data.numero_contrato.strip() if data.numero_contrato else f'CONTRATO-TEMP-{projeto_id}'
+    valor = parse_valor_projeto(data.valor_projeto)
+    await asyncio.to_thread(
+        execute_insert,
+        'INSERT INTO contrato (cliente_id, projeto_externo_id, numero, valor_total) VALUES (%s, %s, %s, %s)',
+        (cliente_id, projeto_id, numero, valor),
+    )
 
     # 3. Vincular serviços
     for servico_id in (data.servicos_projeto or []):

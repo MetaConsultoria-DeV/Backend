@@ -54,14 +54,15 @@ def resolve_cliente(cpf_cnpj: Optional[str], nome_normalizado: str) -> Optional[
 def resolve_contrato_por_numero(numero: str) -> Optional[dict]:
     """Procura um contrato existente pelo número (chave de negócio, UNIQUE).
 
-    Retorna {'id', 'projeto_externo_id'} se já existe, senão None. Usado para o bot
-    NÃO duplicar projeto/contrato quando o número já está no banco (curado à mão ou
-    importado do Excel). 'numero' é globalmente único, então não filtra por source.
+    Retorna {'id', 'projeto_externo_id', 'cliente_id'} se já existe, senão None.
+    Usado para o bot NÃO duplicar projeto/contrato quando o número já está no banco
+    (curado à mão ou criado pelo app). 'numero' é globalmente único, então não
+    filtra por source.
     """
     if not numero:
         return None
     return execute_query(
-        "SELECT id, projeto_externo_id FROM contrato WHERE numero = %s LIMIT 1",
+        "SELECT id, projeto_externo_id, cliente_id FROM contrato WHERE numero = %s LIMIT 1",
         (numero,), fetch_one=True
     )
 
