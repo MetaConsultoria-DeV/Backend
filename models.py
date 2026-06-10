@@ -119,6 +119,7 @@ class ProjetoUpdate(BaseModel):
     possui_orientador: Optional[int] = None
     nome_orientador: Optional[str] = None
     status: Optional[Literal['ativo', 'finalizado', 'pausado']] = None
+    servicos_projeto: Optional[List[int]] = None
 
 
 class ProjetoCreate(BaseModel):

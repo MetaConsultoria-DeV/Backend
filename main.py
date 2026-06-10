@@ -966,6 +966,19 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
             (client_id, projeto_id, data.numero_contrato or '', data.valor_total or 0.0)
         )
 
+    if data.servicos_projeto is not None:
+        await asyncio.to_thread(
+            execute_query,
+            'DELETE FROM projeto_servico WHERE projeto_externo_id = %s',
+            (projeto_id,)
+        )
+        for servico_id in data.servicos_projeto:
+            await asyncio.to_thread(
+                execute_query,
+                'INSERT IGNORE INTO projeto_servico (projeto_externo_id, servico_id) VALUES (%s, %s)',
+                (projeto_id, servico_id),
+            )
+
     return {'success': True, 'message': 'Projeto atualizado com sucesso'}
 
 

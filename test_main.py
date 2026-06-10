@@ -696,6 +696,44 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('SELECT id FROM contrato', queries[2])
         self.assertIn('UPDATE contrato', queries[3])
 
+    async def test_update_projeto_success_updates_services(self):
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        mock_returns = [
+            {'id': 10}, # check if exists
+            1,          # update projeto_externo
+            {'id': 5},  # check contract
+            1,          # update contract
+            1,          # delete from projeto_servico
+            1,          # insert ignore servico 1
+            1,          # insert ignore servico 2
+        ]
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=mock_returns) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            response = self.client.put('/api/projetos/10', headers=self.auth, json={
+                'nome': 'Projeto Editado',
+                'descricao_projeto': 'Desc Editada',
+                'data_inicio': '2026-05-01',
+                'numero_contrato': '123-ABC',
+                'valor_total': 25000.0,
+                'possui_orientador': 1,
+                'nome_orientador': 'Orientador Teste',
+                'servicos_projeto': [4, 7]
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'success': True, 'message': 'Projeto atualizado com sucesso'})
+        
+        self.assertEqual(execute_query.call_count, 7)
+        queries = [call.args[0] for call in execute_query.call_args_list]
+        self.assertIn('DELETE FROM projeto_servico WHERE projeto_externo_id', queries[4])
+        self.assertIn('INSERT IGNORE INTO projeto_servico', queries[5])
+        self.assertIn('INSERT IGNORE INTO projeto_servico', queries[6])
+
 
 
 
