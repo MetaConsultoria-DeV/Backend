@@ -32,9 +32,22 @@ async def lifespan(app: FastAPI):
     close_pool()
 
 
-app = FastAPI(title='PAPE API', version='1.0.0', lifespan=lifespan)
+# ENABLE_DOCS=0 desativa /docs, /redoc e /openapi.json em produção
+_docs_enabled = os.getenv('ENABLE_DOCS', '1') == '1'
+app = FastAPI(
+    title='PAPE API',
+    version='1.0.0',
+    lifespan=lifespan,
+    docs_url='/docs' if _docs_enabled else None,
+    redoc_url='/redoc' if _docs_enabled else None,
+    openapi_url='/openapi.json' if _docs_enabled else None,
+)
 
-ALLOWED_ORIGINS = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,

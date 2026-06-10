@@ -2,6 +2,7 @@
 
 import os
 import logging
+import secrets
 from fastapi import APIRouter, Header, HTTPException, Query, UploadFile, File
 
 from .pipefy.sync import run_sync
@@ -11,13 +12,13 @@ from .contabil.sync import run_sync as run_sync_contabil
 logger = logging.getLogger("ingestion.router")
 router = APIRouter(prefix="/internal", tags=["internal"])
 
-_INTERNAL_TOKEN: str = os.getenv("INTERNAL_SYNC_TOKEN", "")
-
-
 def _check_token(x_internal_token: str | None) -> None:
-    if not _INTERNAL_TOKEN:
-        raise HTTPException(status_code=500, detail="INTERNAL_SYNC_TOKEN não configurado")
-    if x_internal_token != _INTERNAL_TOKEN:
+    # Lido em tempo de chamada (não no import) para não depender da ordem de load_dotenv.
+    internal_token = os.getenv("INTERNAL_SYNC_TOKEN", "")
+    if not internal_token:
+        raise HTTPException(status_code=503, detail="INTERNAL_SYNC_TOKEN não configurado")
+    # compare_digest: comparação em tempo constante (evita timing attack)
+    if not x_internal_token or not secrets.compare_digest(x_internal_token, internal_token):
         raise HTTPException(status_code=401, detail="Token interno inválido ou ausente")
 
 
