@@ -314,15 +314,17 @@ async def get_transversais_facts():
         """
         SELECT
           pe.id AS projeto_id, pe.nome AS projeto,
+          pe.descricao AS descricao,
+          pe.status AS status,
           COALESCE(c.valor_total, 0) AS valor,
           m.id AS membro_id, m.nome AS membro,
           co.nome AS coordenacao, co.sigla AS coordenacao_sigla,
           cli.nome AS cliente,
           s.nome AS servico,
           cel.nome AS celula
-        FROM membro_projeto mp
-        JOIN projeto_externo pe ON pe.id = mp.projeto_externo_id
-        JOIN membro m ON m.id = mp.membro_id
+        FROM projeto_externo pe
+        LEFT JOIN membro_projeto mp ON pe.id = mp.projeto_externo_id
+        LEFT JOIN membro m ON m.id = mp.membro_id
         LEFT JOIN coordenacao co ON co.id = mp.coordenacao_id
         LEFT JOIN celula cel ON cel.id = co.celula_id
         LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
