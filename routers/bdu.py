@@ -220,7 +220,7 @@ async def get_contratos():
         SELECT c.id, c.numero, c.valor_total, c.quantidade_parcelas, c.fase_atual,
                cli.nome AS cliente, pe.nome AS projeto,
                (SELECT COUNT(*) FROM contrato_pagamento cp
-                 WHERE cp.contrato_id = c.id AND cp.data_pagamento IS NOT NULL) AS parcelas_pagas,
+                 WHERE cp.contrato_id = c.id AND cp.status = 'pago') AS parcelas_pagas,
                (SELECT COUNT(*) FROM contrato_pagamento cp WHERE cp.contrato_id = c.id) AS parcelas_total
         FROM contrato c
         LEFT JOIN cliente cli ON cli.id = c.cliente_id

@@ -43,7 +43,7 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
 
     if source is None:
         return {"lidos": 0, "ignorados": 0, "inseridos": 0, "atualizados": 0,
-                "categorias_criadas": 0, "para_revisao": [],
+                "vinculadas": 0, "categorias_criadas": 0, "para_revisao": [],
                 "erros": ["Nenhum arquivo recebido (source vazio)"]}
 
     try:
@@ -51,7 +51,7 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
     except Exception as exc:
         logger.exception("Falha ao ler a planilha")
         return {"lidos": 0, "ignorados": 0, "inseridos": 0, "atualizados": 0,
-                "categorias_criadas": 0, "para_revisao": [],
+                "vinculadas": 0, "categorias_criadas": 0, "para_revisao": [],
                 "erros": [f"parse: {exc}"]}
 
     contador: dict[str, int] = {}
@@ -75,6 +75,7 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
             "ignorados": lidos - gravaveis,
             "inseridos": 0,
             "atualizados": 0,
+            "vinculadas": 0,
             "categorias_criadas": len(categorias),
             "para_revisao": para_revisao,
             "erros": erros,
@@ -100,6 +101,8 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
     inseridos = 0
     atualizados = 0
     ignorados = 0
+    vinculadas = 0
+    sem_vinculo: list[str] = []
 
     for t in transformadas:
         ref = f"linha {t['data'].isoformat()}/{t['external_id']}"
@@ -114,6 +117,14 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
                 para_revisao.append(f"conta '{t['conta_nome']}' inexistente em conta_bancaria — {ref}")
                 continue
 
+            projeto_id = resolve_projeto(mapas, t["codigo"])
+            if t["codigo"] and projeto_id is None:
+                # Código presente na planilha mas sem projeto/contrato no banco — fica
+                # visível no resumo em vez de falhar em silêncio.
+                sem_vinculo.append(f"código '{t['codigo']}' sem projeto/contrato no banco — {ref}")
+            elif projeto_id is not None:
+                vinculadas += 1
+
             registro = {
                 "data": t["data"],
                 "conta_id": conta_id,
@@ -121,7 +132,7 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
                 "categoria_id": resolve_categoria(mapas, t["categoria_nome"]),
                 "celula_id": resolve_celula(mapas, t["celula_nome"]),
                 "valor": t["valor"],
-                "projeto_externo_id": resolve_projeto(mapas, t["codigo"]),
+                "projeto_externo_id": projeto_id,
                 "external_id": t["external_id"],
                 "external_source": t["external_source"],
             }
@@ -133,11 +144,14 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
             logger.exception("Erro ao gravar transação %s", ref)
             erros.append(f"{ref}: {exc}")
 
+    para_revisao.extend(sem_vinculo)
+
     return {
         "lidos": lidos,
         "ignorados": ignorados,
         "inseridos": inseridos,
         "atualizados": atualizados,
+        "vinculadas": vinculadas,
         "categorias_criadas": categorias_criadas,
         "para_revisao": para_revisao,
         "erros": erros,

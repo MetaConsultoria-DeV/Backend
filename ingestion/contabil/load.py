@@ -37,6 +37,9 @@ def upsert_transacao(t: dict) -> bool:
 
     rowcount do MySQL: 1=insert, 2=update. `contrato_pagamento_id` fica sempre NULL
     nesta automação (é o cross-link do sync do Pipefy).
+
+    `projeto_externo_id` nunca regride: se o resolve desta rodada vier NULL (projeto
+    ainda não importado, external_id trocado etc.), o vínculo já gravado é mantido.
     """
     rowcount = execute_query(
         """
@@ -51,7 +54,7 @@ def upsert_transacao(t: dict) -> bool:
             categoria_id       = VALUES(categoria_id),
             celula_id          = VALUES(celula_id),
             valor              = VALUES(valor),
-            projeto_externo_id = VALUES(projeto_externo_id)
+            projeto_externo_id = COALESCE(VALUES(projeto_externo_id), projeto_externo_id)
         """,
         (
             t["data"], t["conta_id"], t["tipo"], t.get("categoria_id"),
