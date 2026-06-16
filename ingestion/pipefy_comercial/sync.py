@@ -5,9 +5,10 @@ import logging
 from .client import fetch_all_cards, fetch_card_by_id
 from .transform import transform_card
 from .matching import resolve_coordenacao
+from .field_map import EXTERNAL_SOURCE
 from .load import (
     upsert_dim_origem, upsert_dim_motivo, upsert_lead,
-    upsert_oportunidade, upsert_phase_event,
+    upsert_oportunidade, upsert_phase_event, delete_oportunidade_by_external,
 )
 
 logger = logging.getLogger("ingestion.pipefy_comercial.sync")
@@ -156,3 +157,23 @@ def run_sync_card(card_id: str, dry_run: bool = False) -> dict:
         erros.append(f"card {card_id}: {exc}")
 
     return _resumo(acc, 1, erros)
+
+
+def run_delete_card(card_id: str, dry_run: bool = False) -> dict:
+    """
+    Remove a oportunidade de um card excluído no Pipefy (ação card.delete).
+
+    O card já não existe no Pipefy, então não há o que buscar: removemos pela
+    chave externa. Idempotente — se a oportunidade já não existir, removidos=0.
+    """
+    if dry_run:
+        logger.info("[DRY-RUN] Deletaria oportunidade external_id=%s", card_id)
+        return {"lidos": 1, "removidos": 0, "erros": []}
+
+    try:
+        removidos = delete_oportunidade_by_external(EXTERNAL_SOURCE, card_id)
+        logger.info("Delete card %s: %d oportunidade(s) removida(s)", card_id, removidos)
+        return {"lidos": 1, "removidos": removidos, "erros": []}
+    except Exception as exc:
+        logger.exception("Erro ao deletar card %s", card_id)
+        return {"lidos": 1, "removidos": 0, "erros": [f"card {card_id}: {exc}"]}

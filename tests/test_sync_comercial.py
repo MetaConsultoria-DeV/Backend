@@ -95,3 +95,45 @@ def test_run_sync_full_continua_funcionando(monkeypatch):
     assert resumo["lidos"] == 2
     assert resumo["inseridos"] == 2
     assert resumo["erros"] == []
+
+
+def test_run_delete_card_remove(monkeypatch):
+    """card.delete → remove a oportunidade pela chave externa."""
+    chamado = {}
+
+    def _del(source, ext_id):
+        chamado["args"] = (source, ext_id)
+        return 1
+
+    monkeypatch.setattr(sync, "delete_oportunidade_by_external", _del)
+
+    resumo = sync.run_delete_card("999")
+
+    assert chamado["args"] == (sync.EXTERNAL_SOURCE, "999")
+    assert resumo["removidos"] == 1
+    assert resumo["erros"] == []
+
+
+def test_run_delete_card_idempotente(monkeypatch):
+    """Oportunidade já inexistente → removidos=0, sem erro."""
+    monkeypatch.setattr(sync, "delete_oportunidade_by_external", lambda s, e: 0)
+
+    resumo = sync.run_delete_card("inexistente")
+
+    assert resumo["removidos"] == 0
+    assert resumo["erros"] == []
+
+
+def test_run_delete_card_dry_run_nao_remove(monkeypatch):
+    chamou = {"del": False}
+
+    def _del(s, e):
+        chamou["del"] = True
+        return 1
+
+    monkeypatch.setattr(sync, "delete_oportunidade_by_external", _del)
+
+    resumo = sync.run_delete_card("999", dry_run=True)
+
+    assert chamou["del"] is False
+    assert resumo["removidos"] == 0

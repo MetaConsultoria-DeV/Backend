@@ -138,3 +138,15 @@ def upsert_phase_event(e: dict) -> bool:
         ),
     )
     return rowcount == 1
+
+
+# ── delete (card excluído no Pipefy) ─────────────────────────────────────────
+
+def delete_oportunidade_by_external(external_source: str, external_id: str) -> int:
+    """Remove a oportunidade pelo (external_source, external_id). O histórico de
+    fases sai junto (FK oportunidade_phase_history ON DELETE CASCADE). leads e
+    cliente NÃO são tocados. Retorna nº de linhas removidas (0 se já não existia)."""
+    return execute_query(
+        "DELETE FROM oportunidade WHERE external_source = %s AND external_id = %s",
+        (external_source, external_id),
+    )

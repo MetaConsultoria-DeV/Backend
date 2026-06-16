@@ -9,6 +9,7 @@ from .pipefy.sync import run_sync
 from .pipefy_comercial.sync import (
     run_sync as run_sync_comercial,
     run_sync_card as run_sync_comercial_card,
+    run_delete_card as run_delete_comercial_card,
 )
 from .contabil.sync import run_sync as run_sync_contabil
 
@@ -75,23 +76,34 @@ def sync_pipefy_comercial(
 
 @router.post("/sync/pipefy-comercial/card")
 def sync_pipefy_comercial_card(
-    card_id: str = Query(..., description="ID do card do Pipefy a sincronizar"),
+    card_id: str = Query(..., description="ID do card do Pipefy"),
+    action: str | None = Query(
+        default=None,
+        description="Ação do webhook Pipefy. 'card.delete' remove a oportunidade; "
+                    "qualquer outra (ou vazio) sincroniza o card.",
+    ),
     dry_run: bool = Query(default=False, description="Se true, não grava no banco"),
     x_internal_token: str | None = Header(default=None),
 ):
     """
-    Sincroniza UM card do Pipefy de Vendas (ingestão incremental via webhook).
+    Ingestão incremental de UM card do Pipefy de Vendas (via webhook do n8n).
 
     - Exige header `X-Internal-Token` igual a `INTERNAL_SYNC_TOKEN` no .env.
-    - Chamado pelo n8n a cada evento de webhook do Pipefy (card.move,
-      card.field_update, etc). Idempotente — reprocessar o mesmo card é seguro.
+    - `action=card.delete` → remove a oportunidade órfã pela chave externa.
+    - Demais ações (card.create/move/field_update/done) → busca e sincroniza.
+    - Idempotente — reprocessar o mesmo evento é seguro.
     - `?dry_run=true` roda tudo sem gravar.
     """
     _check_token(x_internal_token)
 
-    logger.info("Iniciando sync single-card Pipefy Comercial card_id=%s (dry_run=%s)", card_id, dry_run)
-    resultado = run_sync_comercial_card(card_id, dry_run=dry_run)
-    logger.info("Sync single-card concluído: %s", resultado)
+    if action == "card.delete":
+        logger.info("Delete card Pipefy Comercial card_id=%s (dry_run=%s)", card_id, dry_run)
+        resultado = run_delete_comercial_card(card_id, dry_run=dry_run)
+    else:
+        logger.info("Sync single-card Pipefy Comercial card_id=%s action=%s (dry_run=%s)",
+                    card_id, action, dry_run)
+        resultado = run_sync_comercial_card(card_id, dry_run=dry_run)
+    logger.info("Single-card concluído: %s", resultado)
 
     status_code = 207 if resultado["erros"] else 200
 
