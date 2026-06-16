@@ -1056,6 +1056,47 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
                 (m_id, projeto_id, c_id, cargo_id)
             )
 
+    if data.gerente_projeto is not None:
+        current_gerente_query = '''
+        SELECT mp.membro_id, m.nome 
+        FROM membro_projeto mp 
+        JOIN membro m ON m.id = mp.membro_id 
+        WHERE mp.projeto_externo_id = %s AND mp.cargo_id = 31 AND mp.data_saida IS NULL
+        '''
+        current_gerente = await asyncio.to_thread(execute_query, current_gerente_query, (projeto_id,), fetch_one=True)
+        current_gerente_nome = current_gerente['nome'] if current_gerente else None
+        current_gerente_id = current_gerente['membro_id'] if current_gerente else None
+
+        novo_gerente_nome = data.gerente_projeto.strip() if data.gerente_projeto else None
+        
+        if novo_gerente_nome != current_gerente_nome:
+            if current_gerente_id:
+                await asyncio.to_thread(
+                    execute_query,
+                    '''UPDATE membro_projeto 
+                       SET data_saida = CURRENT_DATE() 
+                       WHERE projeto_externo_id = %s AND membro_id = %s AND cargo_id = 31 AND data_saida IS NULL''',
+                    (projeto_id, current_gerente_id)
+                )
+            
+            if novo_gerente_nome:
+                novo_gerente = await asyncio.to_thread(
+                    execute_query,
+                    'SELECT id FROM membro WHERE nome = %s LIMIT 1',
+                    (novo_gerente_nome,),
+                    fetch_one=True,
+                )
+                if novo_gerente:
+                    n_id = novo_gerente['id']
+                    coordenacao_id = await get_coordenacao_do_membro(n_id)
+                    if coordenacao_id:
+                        await asyncio.to_thread(
+                            execute_query,
+                            '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
+                               VALUES (%s, %s, %s, 31, CURRENT_DATE())''',
+                            (n_id, projeto_id, coordenacao_id)
+                        )
+
     return {'success': True, 'message': 'Projeto atualizado com sucesso'}
 
 

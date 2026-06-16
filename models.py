@@ -121,6 +121,7 @@ class ProjetoUpdate(BaseModel):
     status: Optional[Literal['ativo', 'finalizado', 'pausado']] = None
     servicos_projeto: Optional[List[int]] = None
     membros_projeto: Optional[List[str]] = None  # chaves "membroId-coordenacaoId"
+    gerente_projeto: Optional[str] = None  # Nome do novo gerente
 
 
 class ProjetoCreate(BaseModel):
