@@ -879,7 +879,7 @@ async def get_projeto_detalhes(projeto_id: int):
     WHERE ps.projeto_externo_id = %s
     '''
     membros_query = '''
-    SELECT m.id, m.nome, m.email, cg.nome as cargo, co.nome as coordenacao, co.sigla as coordenacao_sigla
+    SELECT m.id, m.nome, m.email, cg.nome as cargo, co.id as coordenacao_id, co.nome as coordenacao, co.sigla as coordenacao_sigla
     FROM membro_projeto mp
     JOIN membro m ON m.id = mp.membro_id
     JOIN cargo cg ON cg.id = mp.cargo_id
@@ -990,6 +990,52 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
                 execute_query,
                 'INSERT IGNORE INTO projeto_servico (projeto_externo_id, servico_id) VALUES (%s, %s)',
                 (projeto_id, servico_id),
+            )
+
+    if data.membros_projeto is not None:
+        membros_ativos_query = '''
+        SELECT membro_id, coordenacao_id 
+        FROM membro_projeto 
+        WHERE projeto_externo_id = %s AND cargo_id != 31 AND data_saida IS NULL
+        '''
+        membros_ativos = await asyncio.to_thread(execute_query, membros_ativos_query, (projeto_id,), fetch_all=True)
+        db_membros = {f"{m['membro_id']}-{m['coordenacao_id']}" for m in membros_ativos} if membros_ativos else set()
+        
+        req_membros = set()
+        for chave in data.membros_projeto:
+            partes = chave.split('-')
+            if len(partes) == 2:
+                try:
+                    m_id = int(partes[0])
+                    c_id = int(partes[1])
+                    if c_id == 0:
+                        c_id = await get_coordenacao_do_membro(m_id)
+                        if c_id is None:
+                            continue
+                    req_membros.add(f"{m_id}-{c_id}")
+                except ValueError:
+                    continue
+
+        membros_remover = db_membros - req_membros
+        for chave in membros_remover:
+            m_id, c_id = map(int, chave.split('-'))
+            await asyncio.to_thread(
+                execute_query,
+                '''UPDATE membro_projeto 
+                   SET data_saida = CURRENT_DATE() 
+                   WHERE projeto_externo_id = %s AND membro_id = %s AND coordenacao_id = %s AND cargo_id != 31 AND data_saida IS NULL''',
+                (projeto_id, m_id, c_id)
+            )
+
+        membros_adicionar = req_membros - db_membros
+        for chave in membros_adicionar:
+            m_id, c_id = map(int, chave.split('-'))
+            cargo_id = await get_cargo_consultor_do_membro(m_id)
+            await asyncio.to_thread(
+                execute_query,
+                '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
+                   VALUES (%s, %s, %s, %s, CURRENT_DATE())''',
+                (m_id, projeto_id, c_id, cargo_id)
             )
 
     return {'success': True, 'message': 'Projeto atualizado com sucesso'}

@@ -120,6 +120,7 @@ class ProjetoUpdate(BaseModel):
     nome_orientador: Optional[str] = None
     status: Optional[Literal['ativo', 'finalizado', 'pausado']] = None
     servicos_projeto: Optional[List[int]] = None
+    membros_projeto: Optional[List[str]] = None  # chaves "membroId-coordenacaoId"
 
 
 class ProjetoCreate(BaseModel):
