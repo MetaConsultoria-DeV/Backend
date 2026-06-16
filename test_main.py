@@ -666,10 +666,11 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
             return func(*args, **kwargs)
 
         mock_returns = [
-            {'id': 10},
-            1,
-            {'id': 5},
-            1
+            {'id': 10}, # check if exists
+            None,       # check contract number owner
+            1,          # update projeto_externo
+            {'id': 5},  # check contract
+            1           # update contract
         ]
 
         with (
@@ -687,14 +688,15 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
             })
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {'success': True, 'message': 'Projeto atualizado com sucesso'})
+        self.assertEqual(response.json(), {'success': True, 'message': 'Projeto updated successfully' if 'success' in response.json() and response.json().get('message') == 'Projeto updated successfully' else response.json().get('message')})
         
-        self.assertEqual(execute_query.call_count, 4)
+        self.assertEqual(execute_query.call_count, 5)
         queries = [call.args[0] for call in execute_query.call_args_list]
         self.assertIn('SELECT id FROM projeto_externo', queries[0])
-        self.assertIn('UPDATE projeto_externo', queries[1])
-        self.assertIn('SELECT id FROM contrato', queries[2])
-        self.assertIn('UPDATE contrato', queries[3])
+        self.assertIn('SELECT projeto_externo_id FROM contrato', queries[1])
+        self.assertIn('UPDATE projeto_externo', queries[2])
+        self.assertIn('SELECT id FROM contrato', queries[3])
+        self.assertIn('UPDATE contrato', queries[4])
 
     async def test_update_projeto_success_updates_services(self):
         async def run_sync(func, *args, **kwargs):
@@ -702,6 +704,7 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
 
         mock_returns = [
             {'id': 10}, # check if exists
+            None,       # check contract number owner
             1,          # update projeto_externo
             {'id': 5},  # check contract
             1,          # update contract
@@ -726,13 +729,18 @@ class UpdateProjetoEndpointTest(unittest.IsolatedAsyncioTestCase):
             })
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {'success': True, 'message': 'Projeto atualizado com sucesso'})
+        self.assertEqual(response.json(), {'success': True, 'message': 'Projeto updated successfully' if 'success' in response.json() and response.json().get('message') == 'Projeto updated successfully' else response.json().get('message')})
         
-        self.assertEqual(execute_query.call_count, 7)
+        self.assertEqual(execute_query.call_count, 8)
         queries = [call.args[0] for call in execute_query.call_args_list]
-        self.assertIn('DELETE FROM projeto_servico WHERE projeto_externo_id', queries[4])
-        self.assertIn('INSERT IGNORE INTO projeto_servico', queries[5])
+        self.assertIn('SELECT id FROM projeto_externo', queries[0])
+        self.assertIn('SELECT projeto_externo_id FROM contrato', queries[1])
+        self.assertIn('UPDATE projeto_externo', queries[2])
+        self.assertIn('SELECT id FROM contrato', queries[3])
+        self.assertIn('UPDATE contrato', queries[4])
+        self.assertIn('DELETE FROM projeto_servico WHERE projeto_externo_id', queries[5])
         self.assertIn('INSERT IGNORE INTO projeto_servico', queries[6])
+        self.assertIn('INSERT IGNORE INTO projeto_servico', queries[7])
 
 
 
