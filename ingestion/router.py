@@ -6,7 +6,10 @@ import secrets
 from fastapi import APIRouter, Header, HTTPException, Query, UploadFile, File
 
 from .pipefy.sync import run_sync
-from .pipefy_comercial.sync import run_sync as run_sync_comercial
+from .pipefy_comercial.sync import (
+    run_sync as run_sync_comercial,
+    run_sync_card as run_sync_comercial_card,
+)
 from .contabil.sync import run_sync as run_sync_contabil
 
 logger = logging.getLogger("ingestion.router")
@@ -63,6 +66,32 @@ def sync_pipefy_comercial(
     logger.info("Iniciando sync Pipefy Comercial (dry_run=%s)", dry_run)
     resultado = run_sync_comercial(dry_run=dry_run)
     logger.info("Sync comercial concluído: %s", resultado)
+
+    status_code = 207 if resultado["erros"] else 200
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=status_code, content=resultado)
+
+
+@router.post("/sync/pipefy-comercial/card")
+def sync_pipefy_comercial_card(
+    card_id: str = Query(..., description="ID do card do Pipefy a sincronizar"),
+    dry_run: bool = Query(default=False, description="Se true, não grava no banco"),
+    x_internal_token: str | None = Header(default=None),
+):
+    """
+    Sincroniza UM card do Pipefy de Vendas (ingestão incremental via webhook).
+
+    - Exige header `X-Internal-Token` igual a `INTERNAL_SYNC_TOKEN` no .env.
+    - Chamado pelo n8n a cada evento de webhook do Pipefy (card.move,
+      card.field_update, etc). Idempotente — reprocessar o mesmo card é seguro.
+    - `?dry_run=true` roda tudo sem gravar.
+    """
+    _check_token(x_internal_token)
+
+    logger.info("Iniciando sync single-card Pipefy Comercial card_id=%s (dry_run=%s)", card_id, dry_run)
+    resultado = run_sync_comercial_card(card_id, dry_run=dry_run)
+    logger.info("Sync single-card concluído: %s", resultado)
 
     status_code = 207 if resultado["erros"] else 200
 
