@@ -32,7 +32,10 @@ def _f(value) -> float:
 # VISÃO GERAL (home) — TASK-023
 # ============================================================
 @router.get("/overview")
-async def get_overview():
+async def get_overview(
+    data_inicio: str | None = Query(default=None),
+    data_fim: str | None = Query(default=None),
+):
     counts_q = """
     SELECT
       (SELECT COUNT(*) FROM membro) AS membros,
@@ -49,8 +52,12 @@ async def get_overview():
     receita = await asyncio.to_thread(
         execute_query, "SELECT COALESCE(SUM(valor_total), 0) AS total FROM contrato", None, True, False
     )
+    # Recorte temporal só vale para o caixa (transacao.data); contagens e receita
+    # contratada não têm data confiável no banco (datas de contrato 100% nulas).
+    clausula, params = _periodo(data_inicio, data_fim, coluna="data")
     fluxo = await _q(
-        "SELECT tipo, COALESCE(SUM(valor), 0) AS total FROM transacao GROUP BY tipo"
+        f"SELECT tipo, COALESCE(SUM(valor), 0) AS total FROM transacao WHERE 1=1 {clausula} GROUP BY tipo",
+        tuple(params) or None,
     )
     entradas = next((_f(r["total"]) for r in fluxo if r["tipo"] == "entrada"), 0.0)
     saidas = next((_f(r["total"]) for r in fluxo if r["tipo"] == "saida"), 0.0)
@@ -220,7 +227,7 @@ async def get_contratos():
         SELECT c.id, c.numero, c.valor_total, c.quantidade_parcelas, c.fase_atual,
                cli.nome AS cliente, pe.nome AS projeto,
                (SELECT COUNT(*) FROM contrato_pagamento cp
-                 WHERE cp.contrato_id = c.id AND cp.data_pagamento IS NOT NULL) AS parcelas_pagas,
+                 WHERE cp.contrato_id = c.id AND cp.status = 'pago') AS parcelas_pagas,
                (SELECT COUNT(*) FROM contrato_pagamento cp WHERE cp.contrato_id = c.id) AS parcelas_total
         FROM contrato c
         LEFT JOIN cliente cli ON cli.id = c.cliente_id
@@ -231,10 +238,14 @@ async def get_contratos():
 
 
 @router.get("/financeiro/transacoes")
-async def get_transacoes(tipo: str | None = Query(default=None)):
-    clausula, params = "", []
+async def get_transacoes(
+    tipo: str | None = Query(default=None),
+    data_inicio: str | None = Query(default=None),
+    data_fim: str | None = Query(default=None),
+):
+    clausula, params = _periodo(data_inicio, data_fim, coluna="t.data")
     if tipo in ("entrada", "saida"):
-        clausula = " AND t.tipo = %s"
+        clausula += " AND t.tipo = %s"
         params.append(tipo)
     return await _q(
         f"""
@@ -254,32 +265,44 @@ async def get_transacoes(tipo: str | None = Query(default=None)):
 
 
 @router.get("/financeiro/fluxo")
-async def get_fluxo():
+async def get_fluxo(
+    data_inicio: str | None = Query(default=None),
+    data_fim: str | None = Query(default=None),
+):
     """Entradas vs. saídas agregadas por mês (YYYY-MM)."""
+    clausula, params = _periodo(data_inicio, data_fim, coluna="t.data")
     return await _q(
-        """
+        f"""
         SELECT DATE_FORMAT(t.data, '%Y-%m') AS mes,
                COALESCE(SUM(CASE WHEN t.tipo = 'entrada' THEN t.valor END), 0) AS entrada,
                COALESCE(SUM(CASE WHEN t.tipo = 'saida' THEN t.valor END), 0) AS saida
         FROM transacao t
+        WHERE 1=1 {clausula}
         GROUP BY mes ORDER BY mes
-        """
+        """,
+        tuple(params) or None,
     )
 
 
 @router.get("/financeiro/contas")
-async def get_contas():
+async def get_contas(
+    data_inicio: str | None = Query(default=None),
+    data_fim: str | None = Query(default=None),
+):
+    # Filtro vai no ON (não no WHERE) para manter contas sem movimento no período.
+    clausula, params = _periodo(data_inicio, data_fim, coluna="t.data")
     return await _q(
-        """
+        f"""
         SELECT cb.nome AS conta,
                COALESCE(SUM(CASE WHEN t.tipo = 'entrada' THEN t.valor
                                  WHEN t.tipo = 'saida' THEN -t.valor END), 0) AS saldo
         FROM conta_bancaria cb
-        LEFT JOIN transacao t ON t.conta_id = cb.id
+        LEFT JOIN transacao t ON t.conta_id = cb.id {clausula}
         WHERE cb.ativo = 1
         GROUP BY cb.id, cb.nome
         ORDER BY cb.nome
-        """
+        """,
+        tuple(params) or None,
     )
 
 

@@ -133,23 +133,35 @@ def upsert_contrato(c: dict) -> tuple[int, bool]:
     return row["id"], inserido
 
 
-def atualizar_fase_contrato(contrato_id: int, fase_atual, data_inicio_pagamento, finalizado_em) -> None:
-    """Atualiza SÓ os sinais operacionais do Pipefy num contrato que JÁ existe.
+def completar_contrato_existente(contrato_id: int, c: dict, cliente_id: Optional[int],
+                                 forma_id: Optional[int]) -> None:
+    """Completa um contrato que JÁ existe com os dados financeiros do Pipefy.
 
-    Não toca em numero, projeto_externo_id, cliente_id, valor, parcelas nem nas chaves
-    externas — esses são dados que o Davi cura à mão. Serve para o bot manter a fase em
-    dia sem duplicar nem reapontar contratos existentes. Timestamps só preenchem se
-    vierem (COALESCE), nunca apagam o que já está.
+    Não toca em numero nem reaponta projeto_externo_id (anti-duplicação mantida),
+    mas valor/parcelas/cliente vêm do Pipefy — contratos criados pelo app (valor 0,
+    cliente arbitrário, sem parcelas) eram congelados para sempre quando o bot só
+    atualizava a fase. Campos vazios do card nunca apagam o que já está (COALESCE).
     """
     execute_query(
         """
         UPDATE contrato SET
+            cliente_id            = COALESCE(%s, cliente_id),
+            valor_total           = COALESCE(%s, valor_total),
+            quantidade_parcelas   = COALESCE(%s, quantidade_parcelas),
+            forma_pagamento_id    = COALESCE(forma_pagamento_id, %s),
+            estimativa_gastos_ppp = COALESCE(%s, estimativa_gastos_ppp),
             fase_atual            = %s,
+            data_vencimento_base  = COALESCE(%s, data_vencimento_base),
             data_inicio_pagamento = COALESCE(%s, data_inicio_pagamento),
             finalizado_em         = COALESCE(%s, finalizado_em)
         WHERE id = %s
         """,
-        (fase_atual, data_inicio_pagamento, finalizado_em, contrato_id),
+        (
+            cliente_id, c.get("valor_total"), c.get("quantidade_parcelas"), forma_id,
+            c.get("estimativa_gastos_ppp"), c.get("fase_atual"),
+            c.get("data_vencimento_base"), c.get("data_inicio_pagamento"),
+            c.get("finalizado_em"), contrato_id,
+        ),
     )
 
 

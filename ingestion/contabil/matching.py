@@ -22,12 +22,23 @@ def carregar_mapas() -> dict:
         "SELECT id, external_id FROM projeto_externo WHERE external_id IS NOT NULL",
         fetch_all=True,
     ) or []
+    contratos = execute_query(
+        "SELECT numero, projeto_externo_id FROM contrato "
+        "WHERE numero IS NOT NULL AND projeto_externo_id IS NOT NULL",
+        fetch_all=True,
+    ) or []
+
+    # Código NNN.AAAA -> projeto: contrato.numero é a chave estável (é o mesmo código
+    # da planilha e tem FK pro projeto). external_id é só fallback — reimportações do
+    # Pipefy/portfólio trocam o external_id e quebravam o vínculo das transações.
+    projeto_map = {str(r["external_id"]).strip(): r["id"] for r in projetos}
+    projeto_map.update({str(r["numero"]).strip(): r["projeto_externo_id"] for r in contratos})
 
     return {
         "conta": {norm_key(r["nome"]): r["id"] for r in contas},
         "celula": {norm_key(r["nome"]): r["id"] for r in celulas},
         "categoria": {norm_key(r["nome"]): r["id"] for r in categorias},
-        "projeto": {str(r["external_id"]).strip(): r["id"] for r in projetos},
+        "projeto": projeto_map,
     }
 
 
@@ -44,6 +55,7 @@ def resolve_categoria(mapas: dict, nome) -> int | None:
 
 
 def resolve_projeto(mapas: dict, codigo) -> int | None:
-    """Casa pelo código NNN.YYYY em projeto_externo.external_id. Sem match -> None
-    (não é erro: é gasto/ganho extra ou movimento interno). Nunca cria projeto."""
+    """Casa o código NNN.YYYY por contrato.numero (com fallback em external_id).
+    Sem match -> None (não é erro: é gasto/ganho extra ou movimento interno).
+    Nunca cria projeto."""
     return mapas["projeto"].get(str(codigo).strip()) if codigo else None
