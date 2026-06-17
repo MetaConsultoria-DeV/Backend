@@ -311,6 +311,10 @@ async def get_contas(
 # ============================================================
 @router.get("/servicos/portfolio")
 async def get_servicos_portfolio():
+    # ATENCAO: `oportunidades` e contado por COORDENACAO (nao ha vinculo servico->oportunidade
+    # no banco), entao todo servico da mesma coordenacao repete o mesmo numero. NAO some este
+    # campo por servico no frontend: agregue por coordenacao. `projetos` vem de projeto_servico,
+    # que esta vazia -> 0 para todos enquanto a tabela nao for populada.
     return await _q(
         """
         SELECT s.id, s.nome, s.sigla,
