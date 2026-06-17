@@ -310,21 +310,29 @@ async def get_contas(
 # SERVIÇOS & PORTFÓLIO — TASK-028
 # ============================================================
 @router.get("/servicos/portfolio")
-async def get_servicos_portfolio():
+async def get_servicos_portfolio(
+    data_inicio: str | None = Query(default=None),
+    data_fim: str | None = Query(default=None),
+):
     # ATENCAO: `oportunidades` e contado por COORDENACAO (nao ha vinculo servico->oportunidade
     # no banco), entao todo servico da mesma coordenacao repete o mesmo numero. NAO some este
     # campo por servico no frontend: agregue por coordenacao. `projetos` vem de projeto_servico,
     # que esta vazia -> 0 para todos enquanto a tabela nao for populada.
+    # O recorte temporal (data_inicio/data_fim) filtra a DEMANDA por o.criado_em; o catalogo
+    # de servicos (s.*) e atemporal e nao muda com o periodo.
+    clausula, params = _periodo(data_inicio, data_fim)  # coluna padrao = o.criado_em
     return await _q(
-        """
+        f"""
         SELECT s.id, s.nome, s.sigla,
                co.id AS coordenacao_id, co.nome AS coordenacao, co.sigla AS coordenacao_sigla,
                (SELECT COUNT(*) FROM projeto_servico ps WHERE ps.servico_id = s.id) AS projetos,
-               (SELECT COUNT(*) FROM oportunidade o WHERE o.coordenacao_id = s.coordenacao_id) AS oportunidades
+               (SELECT COUNT(*) FROM oportunidade o
+                 WHERE o.coordenacao_id = s.coordenacao_id {clausula}) AS oportunidades
         FROM servico s
         JOIN coordenacao co ON co.id = s.coordenacao_id
         ORDER BY co.nome, s.nome
-        """
+        """,
+        tuple(params) or None,
     )
 
 
