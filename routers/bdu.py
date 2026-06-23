@@ -163,10 +163,11 @@ async def get_oportunidades(
         f"""
         SELECT o.id, o.fase_atual_nome AS fase, o.valor_fechado AS valor,
                o.status_terminal, o.criado_em, o.responsaveis,
-               cli.nome AS cliente, co.nome AS coordenacao, co.sigla AS coordenacao_sigla,
+               l.nome AS lead, cli.nome AS cliente, co.nome AS coordenacao, co.sigla AS coordenacao_sigla,
                COALESCE(org.canonical_value, org.raw_value) AS origem,
                COALESCE(mp.canonical_value, mp.raw_value) AS motivo_perda
         FROM oportunidade o
+        LEFT JOIN leads l ON l.id = o.lead_id
         LEFT JOIN cliente cli ON cli.id = o.cliente_id
         LEFT JOIN coordenacao co ON co.id = o.coordenacao_id
         LEFT JOIN dim_lead_origem org ON org.id = o.origem_id
