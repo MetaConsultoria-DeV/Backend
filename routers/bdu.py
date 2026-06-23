@@ -238,9 +238,20 @@ async def get_clientes_comercial():
 # FINANCEIRO — TASK-027
 # ============================================================
 @router.get("/financeiro/contratos")
-async def get_contratos():
+async def get_contratos(
+    data_inicio: str | None = Query(default=None),
+    data_fim: str | None = Query(default=None),
+):
+    clausula, params = "", []
+    if data_inicio:
+        clausula += " AND (c.data_fim IS NULL OR c.data_fim >= %s)"
+        params.append(data_inicio)
+    if data_fim:
+        clausula += " AND (c.data_inicio IS NULL OR c.data_inicio <= %s)"
+        params.append(data_fim)
+
     return await _q(
-        """
+        f"""
         SELECT c.id, c.numero, c.valor_total, c.quantidade_parcelas, c.fase_atual,
                cli.nome AS cliente, pe.nome AS projeto,
                (SELECT COUNT(*) FROM contrato_pagamento cp
@@ -249,8 +260,10 @@ async def get_contratos():
         FROM contrato c
         LEFT JOIN cliente cli ON cli.id = c.cliente_id
         LEFT JOIN projeto_externo pe ON pe.id = c.projeto_externo_id
+        WHERE 1=1 {clausula}
         ORDER BY c.valor_total DESC
-        """
+        """,
+        tuple(params) or None,
     )
 
 
