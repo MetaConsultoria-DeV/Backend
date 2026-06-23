@@ -33,6 +33,7 @@ COORD_LABEL_TO_SIGLA = {
     "CE": "CE",
     "GN": "GN",
     "TD": "TD",
+    "DM": "DM",
 }
 
 # ── dim_lead_origem (raw → canonical NULL) — duas fontes, conforme o schema ───
