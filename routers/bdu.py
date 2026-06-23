@@ -179,27 +179,43 @@ async def get_oportunidades(
 
 
 @router.get("/comercial/origens")
-async def get_origens():
+async def get_origens(
+    data_inicio: str | None = Query(default=None),
+    data_fim: str | None = Query(default=None),
+):
+    # Recorte por criado_em (quando a demanda entrou).
+    clausula, params = _periodo(data_inicio, data_fim)  # coluna padrao = o.criado_em
     return await _q(
-        """
+        f"""
         SELECT COALESCE(org.canonical_value, org.raw_value) AS nome, COUNT(*) AS qtd
         FROM oportunidade o
         JOIN dim_lead_origem org ON org.id = o.origem_id
+        WHERE 1=1 {clausula}
         GROUP BY nome ORDER BY qtd DESC
-        """
+        """,
+        tuple(params) or None,
     )
 
 
 @router.get("/comercial/motivos-perda")
-async def get_motivos_perda():
+async def get_motivos_perda(
+    data_inicio: str | None = Query(default=None),
+    data_fim: str | None = Query(default=None),
+):
+    # Recorte por quando a perda aconteceu (finalizado_em), com fallback para
+    # criado_em quando finalizado_em estiver nulo (nao derruba linhas).
+    clausula, params = _periodo(
+        data_inicio, data_fim, coluna="COALESCE(o.finalizado_em, o.criado_em)"
+    )
     return await _q(
-        """
+        f"""
         SELECT COALESCE(mp.canonical_value, mp.raw_value) AS nome, COUNT(*) AS qtd
         FROM oportunidade o
         JOIN dim_motivo_perda mp ON mp.id = o.motivo_perda_id
-        WHERE o.status_terminal IN ('recusado', 'desistido')
+        WHERE o.status_terminal IN ('recusado', 'desistido') {clausula}
         GROUP BY nome ORDER BY qtd DESC
-        """
+        """,
+        tuple(params) or None,
     )
 
 
