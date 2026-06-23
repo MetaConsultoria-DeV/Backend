@@ -150,11 +150,11 @@ def transform_card(card: dict) -> dict:
 
     # ── lead ─────────────────────────────────────────────────────────────────
     lead = {
-        "nome":            _as_text(fmap.get(F_NOME)) or card.get("title", "").strip(),
-        "email":           _as_text(fmap.get(F_EMAIL)) or None,
-        "telefone":        _as_text(fmap.get(F_TELEFONE)) or None,
-        "empresa":         _as_text(fmap.get(F_EMPRESA)) or None,
-        "cargo":           _as_text(fmap.get(F_CARGO)) or None,
+        "nome":            (_as_text(fmap.get(F_NOME)) or card.get("title", "").strip())[:200],
+        "email":           _as_text(fmap.get(F_EMAIL))[:200] or None,
+        "telefone":        _as_text(fmap.get(F_TELEFONE))[:50] or None,
+        "empresa":         _as_text(fmap.get(F_EMPRESA))[:200] or None,
+        "cargo":           _as_text(fmap.get(F_CARGO))[:100] or None,
         "external_source": EXTERNAL_SOURCE,
         "external_id":     card_id,
     }
