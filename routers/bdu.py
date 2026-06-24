@@ -10,11 +10,37 @@ Prefixo: /api/bdu
 """
 
 import asyncio
-from fastapi import APIRouter, Query
+import os
+import secrets
+from fastapi import APIRouter, Query, Header, HTTPException, Depends
 
 from database import execute_query
 
-router = APIRouter(prefix="/api/bdu", tags=["bdu"])
+
+def require_bdu_token(authorization: str | None = Header(default=None)) -> None:
+    """Gate fail-open das rotas de leitura do BDU.
+
+    - Sem `BDU_READ_TOKEN` no ambiente -> libera (comportamento atual; nada muda).
+    - Com a env definida -> exige `Authorization: Bearer <token>`, comparado em
+      tempo constante. O frontend (Next.js, server-side) envia o mesmo token.
+
+    Para ATIVAR a proteção sem janela de queda: defina BDU_READ_TOKEN primeiro no
+    frontend (reinicie), depois no backend (reinicie). Mesmo valor nos dois lados.
+    """
+    expected = os.getenv("BDU_READ_TOKEN", "")
+    if not expected:
+        return  # fail-open: a proteção só liga quando a env existir nos dois lados
+    prefix = "Bearer "
+    provided = authorization[len(prefix):] if authorization and authorization.startswith(prefix) else ""
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Não autorizado")
+
+
+router = APIRouter(
+    prefix="/api/bdu",
+    tags=["bdu"],
+    dependencies=[Depends(require_bdu_token)],
+)
 
 
 async def _q(query: str, params=None):
