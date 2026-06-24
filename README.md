@@ -1,149 +1,117 @@
-# PAPE Backend — FastAPI
+# 🛠️ BDU Backend — FastAPI Core
 
-API do formulário PAPE (Plano de Acompanhamento de Projetos Externos) integrada ao MySQL e n8n.
+O **BDU Backend** é o motor de processamento e orquestração do **Banco de Dados Único (BDU)** da Meta Consultoria. Ele é responsável por conectar a aplicação front-end à base de dados relacional (MySQL), além de gerenciar a ingestão e sincronização de dados externos (como planilhas de Controle Contábil e cartões do Pipefy) através da integração com webhooks do **n8n** e APIs do SharePoint.
 
-## Setup
+---
 
-### 1. Instalar dependências
+## 🚀 Tecnologias Utilizadas
 
+- **Linguagem:** Python 3.12
+- **Framework Web:** [FastAPI](https://fastapi.tiangolo.com/) (rápido, tipado e com documentação automática)
+- **Banco de Dados:** MySQL (utilizando `mysql-connector-python` com pool de conexões)
+- **Integração:** Webhooks do n8n para sincronização com Office 365 / SharePoint
+- **Testes:** Pytest (94 testes unitários ativos de consistência e regras de negócio)
+
+---
+
+## 📁 Estrutura de Pastas Simplificada
+
+```text
+backend/
+├── ingestion/               # Módulos de carga e transformação de dados
+│   ├── contabil/            # Importador e parser de planilhas Excel Contábil
+│   ├── pipefy/              # Integração de contratos e finanças via Pipefy
+│   └── pipefy_comercial/    # Integração de Leads e Funil Comercial
+├── routers/                 # Rotas da API divididas por escopo
+│   └── bdu.py               # Endpoints de leitura de dados para o painel BDU
+├── tests/                   # Suíte de testes automatizados (pytest)
+├── database.py              # Pool de conexões MySQL e gerenciador de transações
+├── main.py                  # Ponto de entrada da API e rotas de edição/PAPE
+├── models.py                # Modelos Pydantic para validação de dados
+└── requirements.txt         # Dependências do Python
+```
+
+---
+
+## ⚡ Fluxo Geral de Arquitetura
+
+O backend opera como um gateway e integrador de dados:
+
+```text
+  [ Next.js Frontend ] ──( HTTP POST /api/pape )──► [ FastAPI Backend ]
+                                                           │
+                                        ┌──────────────────┴──────────────────┐
+                                        ▼                                     ▼
+                                [ MySQL Database ]                    [ n8n Webhook ]
+                          (Salva resposta localmente)            (Dispara fluxo de sync)
+                                                                              │
+                                                                              ▼
+                                                                     [ SharePoint Excel ]
+                                                                 (Atualiza planilha oficial)
+```
+
+---
+
+## ⚙️ Configuração Local
+
+### 1. Pré-requisitos
+Certifique-se de possuir o Python 3.12+ instalado em sua máquina.
+
+### 2. Instalar dependências
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configurar environment variables
-
-Copie `.env.example` para `.env` e preencha com seus dados:
-
+### 3. Configurar variáveis de ambiente
+Copie o arquivo de exemplo e configure suas variáveis locais:
 ```bash
 cp .env.example .env
 ```
-
-Edite `.env` com as credenciais do MySQL:
-
+Abra o arquivo `.env` e configure a conexão com o seu banco de dados MySQL local e a chave de segurança:
 ```env
 DB_HOST=localhost
 DB_USER=root
 DB_PASSWORD=sua_senha
 DB_NAME=banco_de_dados
 DB_PORT=3306
+DB_POOL_SIZE=5
 
+ADMIN_API_TOKEN=seu_token_super_secreto
 N8N_WEBHOOK_URL=http://localhost:5678/webhook/pape
 ```
 
-### 3. Executar a API
-
+### 4. Executar o Servidor de Desenvolvimento
 ```bash
 python main.py
 ```
+A API iniciará por padrão em `http://localhost:8000`.
 
-A API estará disponível em `http://localhost:8000`
+Acesse a documentação interativa oficial (Swagger UI) para testar e visualizar os endpoints em:
+👉 **[http://localhost:8000/docs](http://localhost:8000/docs)**
 
-Documentação automática (Swagger):
-- `http://localhost:8000/docs`
+---
 
-## Endpoints
+## 🧪 Executando Testes Unitários
 
-### GET `/api/projetos`
-Retorna lista de projetos ativos.
+A suíte de testes valida as regras de negócio, parser contábil e transformações do Pipefy sem tocar no banco de dados de produção (usando mocks do cursor de banco).
 
-**Response:**
-```json
-[
-  {
-    "id": 1,
-    "nome": "Miller P(AI)",
-    "numero_contrato": "111.0001",
-    "valor_total": 50000.00
-  }
-]
-```
-
-### GET `/api/projetos/{projeto_id}`
-Retorna detalhes do projeto + serviços + coordenações.
-
-### GET `/api/coordenacoes`
-Retorna lista de coordenações.
-
-### GET `/api/membros`
-Retorna lista de membros.
-
-### POST `/api/pape`
-Submete resposta do formulário PAPE.
-
-**Body:**
-```json
-{
-  "respondente_nome": "João Silva",
-  "projeto_externo_id": 1,
-  "primeira_resposta": "Sim",
-  "modelo_gerenciamento": "Ágil",
-  "pct_conclusao": "41-60%",
-  "status_cronograma": "Dentro do prazo",
-  "capacitacao_equipe": 4,
-  "eficacia_metodologia": 4,
-  "nivel_retrabalho": 2,
-  "comunicacao_cliente": 4,
-  "abertura_cliente": 4,
-  "satisfacao_cliente": 4,
-  ...mais campos
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Formulário enviado com sucesso",
-  "acompanhamento_id": 123
-}
-```
-
-## Fluxo de dados
-
-```
-Next.js (front-end)
-    ↓ POST /api/pape
-FastAPI (backend)
-    ├─ Insere em MySQL (acompanhamento_projeto + tabelas filhas)
-    └─ Dispara webhook do n8n com os 29 campos do formulário
-        ↓
-    n8n
-        └─ Atualiza Excel no SharePoint (via Microsoft Graph API)
-```
-
-## Desenvolvimento
-
-Para desenvolvimento com auto-reload:
-
+Para rodar os testes locally, configure a variável `ADMIN_API_TOKEN` no terminal e execute o pytest:
 ```bash
-pip install uvicorn[standard]
-uvicorn main:app --reload
+# Windows (PowerShell)
+$env:ADMIN_API_TOKEN="test_token"; pytest
+
+# Linux / macOS
+ADMIN_API_TOKEN="test_token" pytest
 ```
 
-## Production
+---
 
-Na VPS, use o Gunicorn:
+## 🐳 Produção & VPS
 
-```bash
-pip install gunicorn
-gunicorn -w 4 -b 0.0.0.0:8000 main:app
-```
+Para implantar em servidores de produção (VPS), o backend conta com suporte a contêineres Docker e orquestração por Gunicorn:
 
-Ou use systemd para auto-start:
-
-```ini
-[Unit]
-Description=PAPE FastAPI
-After=network.target
-
-[Service]
-Type=simple
-User=www-data
-WorkingDirectory=/home/usuario/pape-backend
-Environment="PATH=/home/usuario/.venv/bin"
-ExecStart=/home/usuario/.venv/bin/gunicorn -w 4 -b 0.0.0.0:8000 main:app
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
+- **Docker:** Utilize o `Dockerfile` incluso para construir a imagem da aplicação.
+- **Gunicorn:** Execute com múltiplos workers para gerenciar alta concorrência:
+  ```bash
+  gunicorn -w 4 -b 0.0.0.0:8000 main:app
+  ```
