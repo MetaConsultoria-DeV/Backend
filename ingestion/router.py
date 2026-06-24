@@ -1,4 +1,9 @@
-"""router.py — POST /internal/sync/pipefy-financeiro"""
+"""Module containing the internal routes for triggering synchronization workflows.
+
+This router registers endpoints that handle manual or webhook-triggered runs
+for Pipefy Financeiro, Pipefy Comercial (Sales Pipeline), and the Excel-based
+Controle Contábil ingestion.
+"""
 
 import os
 import logging
@@ -13,15 +18,28 @@ from .pipefy_comercial.sync import (
 )
 from .contabil.sync import run_sync as run_sync_contabil
 
+# Set up logging for the ingestion router
 logger = logging.getLogger("ingestion.router")
 router = APIRouter(prefix="/internal", tags=["internal"])
 
 def _check_token(x_internal_token: str | None) -> None:
-    # Lido em tempo de chamada (não no import) para não depender da ordem de load_dotenv.
+    """Verifies the incoming request token against the configured internal sync token.
+
+    Uses secrets.compare_digest for constant-time comparison to prevent timing attacks.
+    The environment variable check is performed at call-time to ensure any dynamic dotenv
+    updates are reflected.
+
+    Args:
+        x_internal_token (str | None): The token provided in the request's Header.
+
+    Raises:
+        HTTPException: 503 if INTERNAL_SYNC_TOKEN is not configured in environment variables.
+        HTTPException: 401 if x_internal_token is missing or does not match the configured token.
+    """
     internal_token = os.getenv("INTERNAL_SYNC_TOKEN", "")
     if not internal_token:
         raise HTTPException(status_code=503, detail="INTERNAL_SYNC_TOKEN não configurado")
-    # compare_digest: comparação em tempo constante (evita timing attack)
+    # compare_digest: constant-time comparison to prevent timing attacks
     if not x_internal_token or not secrets.compare_digest(x_internal_token, internal_token):
         raise HTTPException(status_code=401, detail="Token interno inválido ou ausente")
 
@@ -31,11 +49,18 @@ def sync_pipefy_financeiro(
     dry_run: bool = Query(default=False, description="Se true, não grava no banco"),
     x_internal_token: str | None = Header(default=None),
 ):
-    """
-    Dispara a sincronização Pipefy Financeiro → MySQL.
+    """Dispatches the Pipefy Financeiro to MySQL database synchronization.
 
-    - Exige header `X-Internal-Token` igual a `INTERNAL_SYNC_TOKEN` no .env.
-    - `?dry_run=true` roda tudo sem gravar (ideal para validação).
+    Retrieves finance pipeline cards, normalizes, transforms fields, matches existing records,
+    and runs upsert operations.
+
+    Args:
+        dry_run (bool): If True, executes the entire pipeline without writing changes to the database.
+        x_internal_token (str | None): Header token to authorize the request.
+
+    Returns:
+        JSONResponse: A response detailing the synchronization execution results, including
+            synced count and errors, returning 200 on success or 207 if partial errors occurred.
     """
     _check_token(x_internal_token)
 
@@ -45,7 +70,7 @@ def sync_pipefy_financeiro(
 
     status_code = 200
     if resultado["erros"]:
-        status_code = 207  # Multi-Status — parcialmente bem-sucedido
+        status_code = 207  # Multi-Status — partially successful ingestion
 
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=status_code, content=resultado)
@@ -56,11 +81,18 @@ def sync_pipefy_comercial(
     dry_run: bool = Query(default=False, description="Se true, não grava no banco"),
     x_internal_token: str | None = Header(default=None),
 ):
-    """
-    Dispara a sincronização Pipefy de Vendas (Sales Pipeline) → MySQL comercial.
+    """Dispatches the Pipefy Comercial (Sales Pipeline) to MySQL database synchronization.
 
-    - Exige header `X-Internal-Token` igual a `INTERNAL_SYNC_TOKEN` no .env.
-    - `?dry_run=true` roda tudo sem gravar (ideal para validação).
+    Fetches sales pipeline cards, normalizes and maps opportunity fields, resolves matching IDs,
+    and commits updates.
+
+    Args:
+        dry_run (bool): If True, runs the pipeline without committing changes to the database.
+        x_internal_token (str | None): Header token to authorize the request.
+
+    Returns:
+        JSONResponse: A response detailing the synchronization results, returning 200 on success
+            or 207 if partial errors occurred.
     """
     _check_token(x_internal_token)
 
@@ -85,14 +117,21 @@ def sync_pipefy_comercial_card(
     dry_run: bool = Query(default=False, description="Se true, não grava no banco"),
     x_internal_token: str | None = Header(default=None),
 ):
-    """
-    Ingestão incremental de UM card do Pipefy de Vendas (via webhook do n8n).
+    """Ingests or deletes a single card from the Pipefy Comercial pipeline.
 
-    - Exige header `X-Internal-Token` igual a `INTERNAL_SYNC_TOKEN` no .env.
-    - `action=card.delete` → remove a oportunidade órfã pela chave externa.
-    - Demais ações (card.create/move/field_update/done) → busca e sincroniza.
-    - Idempotente — reprocessar o mesmo evento é seguro.
-    - `?dry_run=true` roda tudo sem gravar.
+    Typically triggered by a webhook (via n8n) when a specific card's state changes.
+    This operation is idempotent; calling it multiple times for the same card is safe.
+
+    Args:
+        card_id (str): The unique identifier of the target Pipefy card.
+        action (str | None): Webhook action name. If set to 'card.delete', the corresponding opportunity
+            in the database will be deleted. Any other value (or null) updates or creates the card.
+        dry_run (bool): If True, performs the operation logic without writing to the database.
+        x_internal_token (str | None): Header token to authorize the request.
+
+    Returns:
+        JSONResponse: Details of the single-card operation, returning 200 on success
+            or 207 if errors occurred.
     """
     _check_token(x_internal_token)
 
@@ -117,13 +156,20 @@ async def sync_controle_contabil(
     dry_run: bool = Query(default=False, description="Se true, não grava no banco"),
     x_internal_token: str | None = Header(default=None),
 ):
-    """
-    Dispara a sincronização do Controle Contábil (planilha SharePoint) → MySQL.
+    """Dispatches the Controle Contábil spreadsheet ingestion.
 
-    - Exige header `X-Internal-Token` igual a `INTERNAL_SYNC_TOKEN` no .env.
-    - Corpo: o arquivo .xlsx (multipart form-data, campo `file`). O n8n baixa do
-      SharePoint via Microsoft Graph e envia aqui — o backend não acessa o SharePoint.
-    - `?dry_run=true` roda tudo sem gravar (ideal para validação).
+    Accepts an uploaded Excel (.xlsx) file representing the accounting spreadsheet.
+    The file is read in memory, parsed, normalized into Pandas DataFrames, and matched
+    against existing database records.
+
+    Args:
+        file (UploadFile): The uploaded Excel file (.xlsx) from multipart/form-data.
+        dry_run (bool): If True, processes the spreadsheet but does not write to the database.
+        x_internal_token (str | None): Header token to authorize the request.
+
+    Returns:
+        JSONResponse: Ingestion statistics including records successfully synced, items
+            flagged for manual review, and details of any errors encountered.
     """
     _check_token(x_internal_token)
 
@@ -136,3 +182,4 @@ async def sync_controle_contabil(
 
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=status_code, content=resultado)
+

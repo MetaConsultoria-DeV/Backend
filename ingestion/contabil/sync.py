@@ -1,7 +1,11 @@
-"""sync.py — Orquestra parse -> transform -> seed -> load e devolve resumo.
+"""Module for orchestrating the Controle Contábil synchronization process.
 
-Fonte = bytes do .xlsx (upload do n8n) ou caminho de arquivo (dry-run/local). Ordem de
-carga: categoria_transacao -> transacao (respeita a FK).
+Coordinates the complete data pipeline lifecycle:
+1. Parsing: Reads the raw Excel workbook and extracts rows.
+2. Transformation: Cleans and standardizes raw rows.
+3. Derivation: Dynamically extracts categories from transaction lines.
+4. Seeding: Upserts unique transaction categories (parent tables first to satisfy foreign keys).
+5. Load: Upserts individual transactions mapping foreign keys via cached memory lookups.
 """
 
 import io
@@ -17,26 +21,34 @@ from .matching import (
 from .load import upsert_categoria, upsert_transacao
 from .normalize import norm_key
 
+# Logger instance for the synchronization process
 logger = logging.getLogger("ingestion.contabil.sync")
 
 
 def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
              dry_run: bool = False) -> dict:
-    """
+    """Executes the Controle Contábil spreadsheet synchronization pipeline.
+
+    Reads accounting transactions from the spreadsheet, resolves and inserts missing
+    categories, matches database entities (accounts, cells, projects, contracts), and performs
+    upsert operations on transaction records.
+
     Args:
-        source: bytes do .xlsx, caminho do arquivo, ou file-like.
-        dry_run: se True, roda parse/transform/seed-dry e NÃO grava.
+        source (Union[bytes, str, io.BytesIO, None]): The Excel file content as bytes,
+            a local file path string, or a file-like BytesIO stream.
+        dry_run (bool): If True, parses, transforms, and derives categories, but skips
+            all database insertions and updates.
 
     Returns:
-        {
-          "lidos": int,               # linhas de transação lidas (com data)
-          "ignorados": int,           # não gravadas (faltou conta/tipo/valor ou conta inexistente)
-          "inseridos": int,
-          "atualizados": int,
-          "categorias_criadas": int,
-          "para_revisao": list[str],
-          "erros": list[str],
-        }
+        dict: A summary dictionary containing the sync execution metrics:
+            - lidos (int): Total number of transaction rows parsed from the spreadsheet.
+            - ignorados (int): Rows skipped due to formatting errors or missing entities.
+            - inseridos (int): Count of new transactions written to the database.
+            - atualizados (int): Count of existing transactions updated in the database.
+            - vinculadas (int): Count of transactions successfully linked to a project.
+            - categorias_criadas (int): Count of new transaction categories created.
+            - para_revisao (list[str]): List of warnings/anomalies requiring manual review.
+            - erros (list[str]): List of execution errors encountered during the run.
     """
     erros: list[str] = []
     para_revisao: list[str] = []
@@ -46,6 +58,7 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
                 "vinculadas": 0, "categorias_criadas": 0, "para_revisao": [],
                 "erros": ["Nenhum arquivo recebido (source vazio)"]}
 
+    # --- Phase 1: Parse Excel ---
     try:
         brutas = parse_xlsx(source)
     except Exception as exc:
@@ -54,16 +67,20 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
                 "vinculadas": 0, "categorias_criadas": 0, "para_revisao": [],
                 "erros": [f"parse: {exc}"]}
 
+    # --- Phase 2: Transform Rows ---
+    # Keeps track of index-based occurrences to generate unique external IDs.
     contador: dict[str, int] = {}
     transformadas = [transform_row(r, contador) for r in brutas]
     lidos = len(transformadas)
 
+    # Collect validation warnings/messages generated during transformation
     for t in transformadas:
         para_revisao.extend(t["revisao"])
 
+    # --- Phase 3: Derive Categories ---
     categorias = derive_categorias(transformadas)
 
-    # ── DRY-RUN: não toca no banco ────────────────────────────────────────────
+    # --- Phase 4: Dry Run check ---
     if dry_run:
         gravaveis = sum(1 for t in transformadas if t["gravavel"])
         logger.info(
@@ -81,7 +98,7 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
             "erros": erros,
         }
 
-    # ── 1. Semear categorias (antes das transações, por causa da FK) ──────────
+    # --- Phase 5: Seed Categories (Parent entities first to respect DB constraints) ---
     mapas = carregar_mapas()
     categorias_criadas = 0
     for c in categorias:
@@ -94,10 +111,10 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
             logger.exception("Erro ao semear categoria %s", c["nome"])
             erros.append(f"categoria {c['nome']}: {exc}")
 
-    # Recarrega o mapa de categorias com os ids recém-criados.
+    # Reload database maps to ensure dynamically created categories are cached
     mapas = carregar_mapas()
 
-    # ── 2. Carregar transações ────────────────────────────────────────────────
+    # --- Phase 6: Load Transactions ---
     inseridos = 0
     atualizados = 0
     ignorados = 0
@@ -107,24 +124,27 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
     for t in transformadas:
         ref = f"linha {t['data'].isoformat()}/{t['external_id']}"
         try:
+            # Skip rows marked as non-writable during the transformation phase
             if not t["gravavel"]:
                 ignorados += 1
                 continue
 
+            # Verify the bank account exists in the database
             conta_id = resolve_conta(mapas, t["conta_nome"])
             if conta_id is None:
                 ignorados += 1
                 para_revisao.append(f"conta '{t['conta_nome']}' inexistente em conta_bancaria — {ref}")
                 continue
 
+            # Attempt to resolve project / contract link
             projeto_id = resolve_projeto(mapas, t["codigo"])
             if t["codigo"] and projeto_id is None:
-                # Código presente na planilha mas sem projeto/contrato no banco — fica
-                # visível no resumo em vez de falhar em silêncio.
+                # Project code exists in spreadsheet but cannot be matched in the DB
                 sem_vinculo.append(f"código '{t['codigo']}' sem projeto/contrato no banco — {ref}")
             elif projeto_id is not None:
                 vinculadas += 1
 
+            # Build database record mapping keys to resolved database foreign key IDs
             registro = {
                 "data": t["data"],
                 "conta_id": conta_id,
@@ -136,6 +156,7 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
                 "external_id": t["external_id"],
                 "external_source": t["external_source"],
             }
+            # Commit transaction row to the database (upsert)
             if upsert_transacao(registro):
                 inseridos += 1
             else:
@@ -144,6 +165,7 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
             logger.exception("Erro ao gravar transação %s", ref)
             erros.append(f"{ref}: {exc}")
 
+    # Append project link warnings to review report
     para_revisao.extend(sem_vinculo)
 
     return {
@@ -156,3 +178,4 @@ def run_sync(source: Union[bytes, str, io.BytesIO, None] = None,
         "para_revisao": para_revisao,
         "erros": erros,
     }
+

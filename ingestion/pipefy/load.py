@@ -1,15 +1,33 @@
-"""load.py — Upserts ON DUPLICATE KEY nas 5 tabelas, na ordem das FKs."""
+"""Module for loading Pipefy Financeiro data into the MySQL database.
+
+Implements sequential upserts (insert or update) across the schema tables:
+1. forma_pagamento (Payment methods)
+2. cliente (Clients, resolved via matching algorithm)
+3. projeto_externo (External projects linked to Pipefy cards)
+4. contrato (Contracts, linked to clients and projects)
+5. contrato_pagamento (Installments/payments associated with contracts)
+"""
 
 import logging
 from typing import Optional
 from database import execute_query, execute_insert
 from .matching import resolve_cliente
 
+# Logger instance for the load module
 logger = logging.getLogger("ingestion.pipefy.load")
 
 
 def upsert_forma_pagamento(nome: str) -> int:
-    """Garante que a forma_pagamento existe e retorna o id."""
+    """Inserts a payment method or returns its ID if it already exists.
+
+    Enforces uniqueness on the `nome` column.
+
+    Args:
+        nome (str): The name of the payment method (e.g. 'Boleto', 'Cartão').
+
+    Returns:
+        int: The database ID of the payment method.
+    """
     execute_query(
         """
         INSERT INTO forma_pagamento (nome)
@@ -26,18 +44,36 @@ def upsert_forma_pagamento(nome: str) -> int:
 
 
 def upsert_cliente(c: dict) -> int:
-    """
-    Resolve o cliente ANTES de gravar, honrando a decisão fechada (matching por nome
-    agora, convergindo pra CPF/CNPJ):
-      1) tenta casar por cpf_cnpj (se preenchido);
-      2) senão, casa por nome normalizado (todos os nomes comparados em Python).
-    Se achou, atualiza a linha existente (preenche lacunas sem clobber) e devolve o id.
-    Se não achou, insere uma linha nova chaveada por (external_source, external_id).
+    """Upserts a client record using a multi-step resolution matching algorithm.
 
-    Assim um mesmo cliente que aparece em vários cards NÃO vira N linhas.
+    Resolves client identity before writing to prevent duplicate records:
+      1. Tries to match by CPF/CNPJ (if provided).
+      2. If unmatched, performs a lookup by normalized name comparison.
+    If an existing client is matched, updates their profile filling in blank fields
+    (using COALESCE) without overwriting existing data.
+    If no match is found, inserts a new client record.
+
+    Args:
+        c (dict): Client dictionary containing:
+            - nome (str): Canonical name of the client.
+            - cpf_cnpj (str | None): Document identifier.
+            - email (str | None): Contact email.
+            - telefone (str | None): Contact phone number.
+            - external_source (str): Source identifier (pipefy_financeiro).
+            - external_id (str): External ID (usually Pipefy card ID).
+            - nome_normalizado (str): Normalized version of the client name.
+
+    Returns:
+        int: The database ID of the client (either resolved or newly created).
+
+    Raises:
+        RuntimeError: If a new client row insertion fails.
     """
+    # Call matching lookup helper
     existing_id = resolve_cliente(c.get("cpf_cnpj"), c.get("nome_normalizado", ""))
+    
     if existing_id:
+        # Update existing record, merging new fields where current values are NULL
         execute_query(
             """
             UPDATE cliente SET
@@ -54,6 +90,7 @@ def upsert_cliente(c: dict) -> int:
         )
         return existing_id
 
+    # If no existing client is found, insert a new record
     new_id = execute_insert(
         """
         INSERT INTO cliente (nome, cpf_cnpj, email, telefone, external_source, external_id)
@@ -68,7 +105,21 @@ def upsert_cliente(c: dict) -> int:
 
 
 def upsert_projeto_externo(p: dict) -> int:
-    """Upsert por (external_source, external_id). Retorna o id."""
+    """Upserts an external project record, unique by `(external_source, external_id)`.
+
+    Args:
+        p (dict): Project details:
+            - nome (str): Project title.
+            - descricao_projeto (str | None): Detailed project description.
+            - external_source (str): Source system tag.
+            - external_id (str): Unique card or project ID.
+
+    Returns:
+        int: The database ID of the external project.
+
+    Raises:
+        RuntimeError: If the project cannot be fetched after execution.
+    """
     execute_query(
         """
         INSERT INTO projeto_externo (nome, descricao_projeto, external_source, external_id)
@@ -90,10 +141,31 @@ def upsert_projeto_externo(p: dict) -> int:
 
 
 def upsert_contrato(c: dict) -> tuple[int, bool]:
-    """Upsert por (external_source, external_id).
+    """Upserts a contract record, unique by `(external_source, external_id)`.
 
-    Retorna (id, inserido) — `inserido=True` quando a linha foi criada agora,
-    `False` quando já existia e foi atualizada. (rowcount do MySQL: 1=insert, 2=update.)
+    Uses COALESCE on update to avoid regression of finance attributes (like parcelas,
+    vencimento, etc.) if subsequent synchronization payloads contain partial data.
+
+    Args:
+        c (dict): Contract details including:
+            - cliente_id (int): Database client ID.
+            - projeto_externo_id (int): Database project ID.
+            - numero (str): Contract identifier number.
+            - valor_total (float): Contract total money value.
+            - forma_pagamento_id (int | None): Database payment method ID.
+            - quantidade_parcelas (int | None): Number of installments.
+            - estimativa_gastos_ppp (float | None): Cost estimation for PPP.
+            - fase_atual (str): Current contract state.
+            - data_vencimento_base (date | None): Base reference day for billing.
+            - data_inicio_pagamento (date | None): Payment schedule start date.
+            - finalizado_em (date | None): Completion timestamp.
+            - external_source (str): Source system.
+            - external_id (str): External ID string.
+
+    Returns:
+        tuple[int, bool]: A tuple containing:
+            - int: The contract database ID.
+            - bool: True if the contract row was newly created, False if it was updated.
     """
     rowcount = execute_query(
         """
@@ -129,18 +201,24 @@ def upsert_contrato(c: dict) -> tuple[int, bool]:
     )
     if not row:
         raise RuntimeError(f"Falha ao upsert contrato: {c['external_id']}")
+    # rowcount == 1 means a new record was successfully inserted.
     inserido = (rowcount == 1)
     return row["id"], inserido
 
 
 def completar_contrato_existente(contrato_id: int, c: dict, cliente_id: Optional[int],
                                  forma_id: Optional[int]) -> None:
-    """Completa um contrato que JÁ existe com os dados financeiros do Pipefy.
+    """Updates missing financial fields on an existing contract record.
 
-    Não toca em numero nem reaponta projeto_externo_id (anti-duplicação mantida),
-    mas valor/parcelas/cliente vêm do Pipefy — contratos criados pelo app (valor 0,
-    cliente arbitrário, sem parcelas) eram congelados para sempre quando o bot só
-    atualizava a fase. Campos vazios do card nunca apagam o que já está (COALESCE).
+    Ensures that contracts created manually in the app can be populated with financial details
+    extracted from Pipefy, without changing the contract number or project link.
+    COALESCE prevents overwriting existing non-null database fields with empty/null card data.
+
+    Args:
+        contrato_id (int): Database ID of the target contract.
+        c (dict): Transformed contract data containing financial updates.
+        cliente_id (int | None): Database ID of the resolved client.
+        forma_id (int | None): Database ID of the resolved payment method.
     """
     execute_query(
         """
@@ -166,7 +244,26 @@ def completar_contrato_existente(contrato_id: int, c: dict, cliente_id: Optional
 
 
 def upsert_contrato_pagamento(p: dict) -> None:
-    """Upsert por (external_source, external_id)."""
+    """Upserts a contract payment (installment) record, unique by `(external_source, external_id)`.
+
+    Ensures installment updates (such as payment dates or status changes) are written
+    without resetting static attributes like payment numbers.
+
+    Args:
+        p (dict): Payment details:
+            - contrato_id (int): Database contract ID.
+            - cliente_id (int): Database client ID.
+            - projeto_externo_id (int): Database project ID.
+            - forma_pagamento_id (int | None): Database payment method ID.
+            - valor (float): Financial value of the installment.
+            - data_vencimento (date | None): Due date.
+            - data_pagamento (date | None): Payment date.
+            - status (str): Installment payment status (e.g. 'pago', 'aberto').
+            - numero_parcela (int): Installment number (e.g., 2).
+            - total_parcelas (int): Total contract installments (e.g., 10).
+            - external_source (str): Source system identifier.
+            - external_id (str): Unique identifier for this specific payment.
+    """
     execute_query(
         """
         INSERT INTO contrato_pagamento (
@@ -188,3 +285,4 @@ def upsert_contrato_pagamento(p: dict) -> None:
             p["external_source"], p["external_id"],
         ),
     )
+

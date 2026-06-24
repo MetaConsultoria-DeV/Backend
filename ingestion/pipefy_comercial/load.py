@@ -1,26 +1,47 @@
-"""load.py — Upserts ON DUPLICATE KEY nas 5 tabelas comerciais, na ordem das FKs.
+"""Module for loading Pipefy Comercial (Sales Pipeline) data into the MySQL database.
 
-Ordem: dim_lead_origem / dim_motivo_perda → leads → oportunidade →
-oportunidade_phase_history. cliente NÃO é tocado (oportunidade.cliente_id fica NULL).
+Coordinates upserts across commercial schemas:
+1. dim_lead_origem / dim_motivo_perda (Dimension tables with automatic value harvesting/seeding)
+2. leads (Leads/prospect profiles)
+3. oportunidade (Sales opportunities linked to leads and coordination)
+4. oportunidade_phase_history (Phase transition event logs)
+
+Handles deletes cascaded via foreign keys if a card is deleted in the source pipeline.
 """
 
 import logging
 from database import execute_query, execute_insert
 
+# Logger instance for the Comercial load module
 logger = logging.getLogger("ingestion.pipefy_comercial.load")
 
 
-# ── Dimensões (raw → canonical NULL, auto-vivify) ────────────────────────────
+# --- Dimensions (Auto-seeding dimensions) ---
 
 def upsert_dim_origem(source_field: str, raw_value: str) -> tuple[int, bool]:
-    """Garante a origem (source_field, raw_value) em dim_lead_origem.
-    Retorna (id, is_new). NUNCA toca canonical_value (Davi mapeia à mão)."""
+    """Ensures a lead origin row exists in the `dim_lead_origem` table.
+
+    Performs dynamic auto-seeding. If the raw value combined with the source field ID
+    does not exist, inserts it. Does not overwrite the `canonical_value` column, as that is
+    manually curated by analysts in the database.
+
+    Args:
+        source_field (str): The ID of the field that captured this value.
+        raw_value (str): The raw string value captured from the source card.
+
+    Returns:
+        tuple[int, bool]: A tuple containing:
+            - int: The database ID of the matched or newly inserted origin row.
+            - bool: True if a new origin row was inserted, False if it already existed.
+    """
     row = execute_query(
         "SELECT id FROM dim_lead_origem WHERE source_field = %s AND raw_value = %s LIMIT 1",
         (source_field, raw_value), fetch_one=True
     )
     if row:
         return row["id"], False
+        
+    # Insert new unmapped raw origin record
     new_id = execute_insert(
         "INSERT INTO dim_lead_origem (raw_value, source_field) VALUES (%s, %s)",
         (raw_value, source_field),
@@ -29,14 +50,28 @@ def upsert_dim_origem(source_field: str, raw_value: str) -> tuple[int, bool]:
 
 
 def upsert_dim_motivo(source_field: str, raw_value: str) -> tuple[int, bool]:
-    """Garante o motivo (source_field, raw_value) em dim_motivo_perda.
-    Retorna (id, is_new). NUNCA toca canonical_value."""
+    """Ensures a loss reason row exists in the `dim_motivo_perda` table.
+
+    Performs dynamic auto-seeding. If the raw reason combined with the source field ID
+    does not exist, inserts a new row. Leaves `canonical_value` untouched for manual curation.
+
+    Args:
+        source_field (str): The ID of the field that captured this loss reason.
+        raw_value (str): The raw reason string captured from the source card.
+
+    Returns:
+        tuple[int, bool]: A tuple containing:
+            - int: The database ID of the matched or newly inserted reason row.
+            - bool: True if a new reason row was inserted, False if it already existed.
+    """
     row = execute_query(
         "SELECT id FROM dim_motivo_perda WHERE source_field = %s AND raw_value = %s LIMIT 1",
         (source_field, raw_value), fetch_one=True
     )
     if row:
         return row["id"], False
+        
+    # Insert new unmapped raw loss reason record
     new_id = execute_insert(
         "INSERT INTO dim_motivo_perda (raw_value, source_field) VALUES (%s, %s)",
         (raw_value, source_field),
@@ -44,11 +79,30 @@ def upsert_dim_motivo(source_field: str, raw_value: str) -> tuple[int, bool]:
     return new_id, True
 
 
-# ── leads ────────────────────────────────────────────────────────────────────
+# --- Leads ---
 
 def upsert_lead(lead: dict) -> int:
-    """Upsert por (external_source, external_id). COALESCE para não apagar
-    campos já preenchidos. Retorna o id."""
+    """Upserts a lead/prospect profile record, unique by `(external_source, external_id)`.
+
+    Uses COALESCE to prevent overwriting existing lead details (like phone or email)
+    if subsequent events omit them.
+
+    Args:
+        lead (dict): Lead fields containing:
+            - nome (str): Lead contact name.
+            - email (str | None): Contact email.
+            - telefone (str | None): Contact phone number.
+            - empresa (str | None): Company name.
+            - cargo (str | None): Job title.
+            - external_source (str): Source identifier (pipefy_comercial).
+            - external_id (str): Unique card/lead identifier.
+
+    Returns:
+        int: The database ID of the lead.
+
+    Raises:
+        RuntimeError: If the lead cannot be fetched after the transaction.
+    """
     execute_query(
         """
         INSERT INTO leads (nome, email, telefone, empresa, cargo, external_source, external_id)
@@ -72,11 +126,39 @@ def upsert_lead(lead: dict) -> int:
     return row["id"]
 
 
-# ── oportunidade ─────────────────────────────────────────────────────────────
+# --- Oportunidade ---
 
 def upsert_oportunidade(o: dict) -> tuple[int, bool]:
-    """Upsert por (external_source, external_id). Retorna (id, inserido).
-    (rowcount do MySQL: 1=insert, 2=update, 0=update sem mudança.)"""
+    """Upserts a sales opportunity record, unique by `(external_source, external_id)`.
+
+    COALESCE is used for attributes like closed value, origin, or coordination to preserve
+    manually registered or previously captured details.
+
+    Args:
+        o (dict): Opportunity fields containing:
+            - lead_id (int): Foreign key referencing the lead profile.
+            - cliente_id (int | None): Foreign key referencing client (usually NULL).
+            - fase_atual_nome (str): Current pipeline stage name.
+            - fase_atual_id (str): Current pipeline stage identifier.
+            - responsaveis (str | None): Assigned negotiators list.
+            - valor_fechado (float | None): Closed financial amount.
+            - origem_id (int | None): Mapped lead origin reference.
+            - motivo_perda_id (int | None): Mapped loss reason reference.
+            - coordenacao_id (int | None): Mapped coordination reference.
+            - status_terminal (str): 'ativo', 'fechado', 'desistido', etc.
+            - criado_em (datetime): Creation date.
+            - finalizado_em (datetime | None): Finalization timestamp.
+            - external_source (str): Source system tag.
+            - external_id (str): Unique opportunity identifier (card ID).
+
+    Returns:
+        tuple[int, bool]: A tuple containing:
+            - int: The opportunity database ID.
+            - bool: True if a new opportunity row was created (rowcount == 1), False otherwise.
+
+    Raises:
+        RuntimeError: If opportunity cannot be retrieved after database operation.
+    """
     rowcount = execute_query(
         """
         INSERT INTO oportunidade (
@@ -113,10 +195,30 @@ def upsert_oportunidade(o: dict) -> tuple[int, bool]:
     return row["id"], (rowcount == 1)
 
 
-# ── oportunidade_phase_history (append-only, idempotente) ────────────────────
+# --- Opportunity Phase History ---
 
 def upsert_phase_event(e: dict) -> bool:
-    """Upsert por (external_source, external_event_id). Retorna is_new."""
+    """Inserts or updates a phase transition event log.
+
+    Enforces uniqueness on `(external_source, external_event_id)` to prevent duplicating
+    transition history records during re-sync.
+
+    Args:
+        e (dict): Event fields:
+            - oportunidade_id (int): Database ID of the opportunity.
+            - from_phase_id (str | None): ID of previous phase.
+            - from_phase_nome (str | None): Name of previous phase.
+            - to_phase_id (str): ID of new phase.
+            - to_phase_nome (str): Name of new phase.
+            - moved_at (datetime): Transition timestamp.
+            - moved_by (str | None): User who performed the action.
+            - duration_previous_phase_seconds (int | None): Seconds spent in previous phase.
+            - external_event_id (str): Unique ID representing this transition event.
+            - external_source (str): Source system.
+
+    Returns:
+        bool: True if the phase event was newly inserted (rowcount == 1), False if updated.
+    """
     rowcount = execute_query(
         """
         INSERT INTO oportunidade_phase_history (
@@ -140,13 +242,24 @@ def upsert_phase_event(e: dict) -> bool:
     return rowcount == 1
 
 
-# ── delete (card excluído no Pipefy) ─────────────────────────────────────────
+# --- Delete Operations ---
 
 def delete_oportunidade_by_external(external_source: str, external_id: str) -> int:
-    """Remove a oportunidade pelo (external_source, external_id). O histórico de
-    fases sai junto (FK oportunidade_phase_history ON DELETE CASCADE). leads e
-    cliente NÃO são tocados. Retorna nº de linhas removidas (0 se já não existia)."""
+    """Deletes an opportunity by its external source key and ID.
+
+    The database schema cascades deletions, meaning removing an opportunity automatically
+    clears associated records in `oportunidade_phase_history`. Related profiles in `leads`
+    and `cliente` tables are not deleted.
+
+    Args:
+        external_source (str): The external source key (e.g. 'pipefy_comercial').
+        external_id (str): Unique card identifier.
+
+    Returns:
+        int: Number of opportunity rows deleted from the database.
+    """
     return execute_query(
         "DELETE FROM oportunidade WHERE external_source = %s AND external_id = %s",
         (external_source, external_id),
     )
+

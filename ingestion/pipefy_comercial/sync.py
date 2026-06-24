@@ -1,4 +1,9 @@
-"""sync.py — Orquestra extract → transform → load do Pipefy de Vendas → MySQL."""
+"""Module for orchestrating the Pipefy Comercial (Sales Pipeline) synchronization.
+
+Coordinates the extraction of sales pipeline cards, maps lead details and opportunity statuses,
+performs dynamic dimension seeding (for origins and loss reasons), and runs database upsert operations.
+Supports both batch runs (`run_sync`) and single card webhook updates (`run_sync_card`, `run_delete_card`).
+"""
 
 import logging
 
@@ -11,11 +16,16 @@ from .load import (
     upsert_oportunidade, upsert_phase_event, delete_oportunidade_by_external,
 )
 
+# Logger instance for the Comercial sync module
 logger = logging.getLogger("ingestion.pipefy_comercial.sync")
 
 
 def _new_acc() -> dict:
-    """Acumulador de contadores compartilhado entre o full sync e o single-card."""
+    """Helper to initialize the synchronization metrics accumulator.
+
+    Returns:
+        dict: Initialized counters dictionary.
+    """
     return {
         "inseridos":         0,
         "atualizados":       0,
@@ -26,6 +36,16 @@ def _new_acc() -> dict:
 
 
 def _flag_dim(acc: dict, prefixo: str, source_field: str, raw: str):
+    """Flags a newly discovered raw value in dimension tables.
+
+    This warning list prompts administrators to map the raw value to a canonical one.
+
+    Args:
+        acc (dict): The active metrics accumulator.
+        prefixo (str): Dimension prefix ('origem' or 'motivo').
+        source_field (str): Field identifier.
+        raw (str): Raw unmapped text value.
+    """
     chave = f"{prefixo}[{source_field}]: {raw}"
     if chave not in acc["_dims_seen"]:
         acc["_dims_seen"].add(chave)
@@ -33,6 +53,16 @@ def _flag_dim(acc: dict, prefixo: str, source_field: str, raw: str):
 
 
 def _resumo(acc: dict, lidos: int, erros: list[str]) -> dict:
+    """Constructs the standard synchronization execution summary.
+
+    Args:
+        acc (dict): The active metrics accumulator.
+        lidos (int): Total records read.
+        erros (list[str]): Errors logged.
+
+    Returns:
+        dict: Standardized sync response dictionary.
+    """
     return {
         "lidos":             lidos,
         "inseridos":         acc["inseridos"],
@@ -44,7 +74,17 @@ def _resumo(acc: dict, lidos: int, erros: list[str]) -> dict:
 
 
 def _process_card(card: dict, acc: dict, dry_run: bool = False) -> None:
-    """Transform + load de um único card. Muta `acc` com os contadores."""
+    """Transforms and loads a single card into the database.
+
+    Runs the transformation pipeline, seeds dimensions (auto-vivify), creates the lead,
+    resolves cell coordination and parent references, and commits the opportunity and
+    historical phase transitions.
+
+    Args:
+        card (dict): Raw card node payload from Pipefy API.
+        acc (dict): Metrics accumulator to record inserts and updates.
+        dry_run (bool): If True, logs metadata and skips database writes.
+    """
     result = transform_card(card)
 
     if dry_run:
@@ -59,15 +99,15 @@ def _process_card(card: dict, acc: dict, dry_run: bool = False) -> None:
         )
         return
 
-    # ── 1. dim_lead_origem (auto-vivify) ────────────────────────────
-    origem_ids = {}  # (source_field, raw) -> id
+    # --- Phase 1: Seed Lead Origins ---
+    origem_ids = {}  # Cache resolved mapping IDs to prevent lookup queries
     for o in result["origens"]:
         oid, is_new = upsert_dim_origem(o["source_field"], o["raw_value"])
         origem_ids[(o["source_field"], o["raw_value"])] = oid
         if is_new:
             _flag_dim(acc, "origem", o["source_field"], o["raw_value"])
 
-    # ── 2. dim_motivo_perda (auto-vivify) ───────────────────────────
+    # --- Phase 2: Seed Loss Reasons ---
     motivo_ids = {}
     for m in result["motivos"]:
         mid, is_new = upsert_dim_motivo(m["source_field"], m["raw_value"])
@@ -75,16 +115,21 @@ def _process_card(card: dict, acc: dict, dry_run: bool = False) -> None:
         if is_new:
             _flag_dim(acc, "motivo", m["source_field"], m["raw_value"])
 
-    # ── 3. leads ────────────────────────────────────────────────────
+    # --- Phase 3: Load Lead ---
     lead_id = upsert_lead(result["lead"])
 
-    # ── 4. oportunidade ─────────────────────────────────────────────
+    # --- Phase 4: Load Opportunity ---
     opp = result["oportunidade"]
     opp["lead_id"] = lead_id
+    # Resolve cell abbreviation (sigla) to its database ID
     opp["coordenacao_id"] = resolve_coordenacao(result["_coord_sigla"])
+    
+    # Resolve the active lead origin reference using the priority config
     ref_o = result["_origem_ref"]
     if ref_o:
         opp["origem_id"] = origem_ids.get((ref_o["source_field"], ref_o["raw_value"]))
+        
+    # Resolve the active loss reason reference using the priority config
     ref_m = result["_motivo_ref"]
     if ref_m:
         opp["motivo_perda_id"] = motivo_ids.get((ref_m["source_field"], ref_m["raw_value"]))
@@ -95,7 +140,7 @@ def _process_card(card: dict, acc: dict, dry_run: bool = False) -> None:
     else:
         acc["atualizados"] += 1
 
-    # ── 5. oportunidade_phase_history ───────────────────────────────
+    # --- Phase 5: Load historical events ---
     for ev in result["phase_events"]:
         ev["oportunidade_id"] = opp_id
         if upsert_phase_event(ev):
@@ -103,21 +148,16 @@ def _process_card(card: dict, acc: dict, dry_run: bool = False) -> None:
 
 
 def run_sync(dry_run: bool = False) -> dict:
-    """
-    Sincroniza o Pipefy de Vendas (Sales Pipeline) → MySQL comercial (full sync).
+    """Executes a full synchronization of the Comercial pipeline cards to MySQL.
 
-    Usado pelo full sync de reconciliação. Para ingestão incremental por evento,
-    ver run_sync_card.
+    Used by manual batch synchronizations and reconciliation loops.
+
+    Args:
+        dry_run (bool): If True, parses and processes card structures but skips
+            persistent database writes.
 
     Returns:
-        {
-          "lidos": int,
-          "inseridos": int,          # oportunidades criadas
-          "atualizados": int,        # oportunidades já existentes
-          "fases_registradas": int,  # eventos de histórico novos
-          "dims_novas": list[str],   # origens/motivos vistos pela 1ª vez (mapear canônico)
-          "erros": list[str],
-        }
+        dict: A summary dictionary of batch execution statistics.
     """
     acc = _new_acc()
     lidos = 0
@@ -136,12 +176,17 @@ def run_sync(dry_run: bool = False) -> dict:
 
 
 def run_sync_card(card_id: str, dry_run: bool = False) -> dict:
-    """
-    Sincroniza UM card do Pipefy de Vendas (ingestão incremental via webhook).
+    """Executes an incremental single-card synchronization (triggered by webhook).
 
-    Busca o card pelo id e roda o mesmo transform/load do full sync. Idempotente
-    (upsert por external_id + dedup de fase por external_event_id). Mesmo contrato
-    de retorno de run_sync.
+    Fetches the specific card from Pipefy, runs transformation rules, and updates
+    or inserts the opportunity. This operation is idempotent.
+
+    Args:
+        card_id (str): The unique identifier of the target card.
+        dry_run (bool): If True, skips writing changes to the database.
+
+    Returns:
+        dict: A summary dictionary of the single card execution.
     """
     acc = _new_acc()
     erros: list[str] = []
@@ -160,11 +205,17 @@ def run_sync_card(card_id: str, dry_run: bool = False) -> dict:
 
 
 def run_delete_card(card_id: str, dry_run: bool = False) -> dict:
-    """
-    Remove a oportunidade de um card excluído no Pipefy (ação card.delete).
+    """Deletes a sales opportunity referenced by a deleted card ID (triggered by webhook).
 
-    O card já não existe no Pipefy, então não há o que buscar: removemos pela
-    chave externa. Idempotente — se a oportunidade já não existir, removidos=0.
+    Since the card has been deleted from Pipefy, this function operates directly on the
+    external ID reference without attempting an API fetch. Cascades deletions to history logs.
+
+    Args:
+        card_id (str): The unique card identifier.
+        dry_run (bool): If True, logs deletion metadata but skips database updates.
+
+    Returns:
+        dict: Execution metrics details containing deleted row count.
     """
     if dry_run:
         logger.info("[DRY-RUN] Deletaria oportunidade external_id=%s", card_id)
@@ -177,3 +228,4 @@ def run_delete_card(card_id: str, dry_run: bool = False) -> dict:
     except Exception as exc:
         logger.exception("Erro ao deletar card %s", card_id)
         return {"lidos": 1, "removidos": 0, "erros": [f"card {card_id}: {exc}"]}
+

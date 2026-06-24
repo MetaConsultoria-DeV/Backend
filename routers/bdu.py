@@ -1,5 +1,4 @@
-"""
-bdu.py — Endpoints read-only que alimentam o frontend BDU (Next.js).
+"""bdu.py — Endpoints read-only que alimentam o frontend BDU (Next.js).
 
 Aditivo: não altera nenhuma rota existente nem o schema MySQL.
 Apenas SELECTs parametrizados (LEFT JOIN + COALESCE) que degradam para
@@ -18,7 +17,7 @@ from database import execute_query
 
 
 def require_bdu_token(authorization: str | None = Header(default=None)) -> None:
-    """Gate fail-open das rotas de leitura do BDU.
+    """Dependency to enforce read token authorization for BDU endpoints.
 
     - Sem `BDU_READ_TOKEN` no ambiente -> libera (comportamento atual; nada muda).
     - Com a env definida -> exige `Authorization: Bearer <token>`, comparado em
@@ -26,6 +25,12 @@ def require_bdu_token(authorization: str | None = Header(default=None)) -> None:
 
     Para ATIVAR a proteção sem janela de queda: defina BDU_READ_TOKEN primeiro no
     frontend (reinicie), depois no backend (reinicie). Mesmo valor nos dois lados.
+
+    Args:
+        authorization (str | None): The Authorization header value. Defaults to Header(default=None).
+
+    Raises:
+        HTTPException: 401 Unauthorized if the token is missing or incorrect.
     """
     expected = os.getenv("BDU_READ_TOKEN", "")
     if not expected:
@@ -44,13 +49,28 @@ router = APIRouter(
 
 
 async def _q(query: str, params=None):
-    """Atalho: roda execute_query(fetch_all=True) numa thread e nunca devolve None."""
+    """Atalho: roda execute_query(fetch_all=True) numa thread e nunca devolve None.
+
+    Args:
+        query (str): The SQL query string.
+        params (tuple, optional): Parameters to bind to the SQL query. Defaults to None.
+
+    Returns:
+        list[dict]: A list of dictionary rows, or an empty list if no results or None returned.
+    """
     rows = await asyncio.to_thread(execute_query, query, params, False, True)
     return rows or []
 
 
 def _f(value) -> float:
-    """Converte Decimal/None para float seguro (JSON)."""
+    """Converte Decimal/None para float seguro (JSON).
+
+    Args:
+        value (Any): The value to convert.
+
+    Returns:
+        float: The converted value, or 0.0 if the value is None.
+    """
     return float(value) if value is not None else 0.0
 
 
@@ -62,6 +82,34 @@ async def get_overview(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/overview
+
+    Returns a high-level summary of total entity counts (members, projects, contracts,
+    coordinations, etc.), and financial summaries (total incoming, outgoing, result,
+    and average ticket value).
+
+    Args:
+        data_inicio (str | None): Filter start date in YYYY-MM-DD format (applies only to transactions).
+        data_fim (str | None): Filter end date in YYYY-MM-DD format (applies only to transactions).
+
+    Returns:
+        dict: High-level KPI indicators. E.g.:
+            {
+                "membros": int,
+                "projetos": int,
+                "contratos": int,
+                "coordenacoes": int,
+                "celulas": int,
+                "servicos": int,
+                "clientes": int,
+                "oportunidades_abertas": int,
+                "receita_contratada": float,
+                "total_entradas": float,
+                "total_saidas": float,
+                "resultado": float,
+                "ticket_medio": float
+            }
+    """
     counts_q = """
     SELECT
       (SELECT COUNT(*) FROM membro) AS membros,
@@ -113,6 +161,17 @@ async def get_overview(
 # ============================================================
 @router.get("/estrutura/celulas")
 async def get_celulas():
+    """GET /api/bdu/estrutura/celulas
+
+    Retrieves a list of cells along with the count of active members within each cell.
+
+    Returns:
+        list[dict]: List of cells:
+            - id (int): Cell ID.
+            - nome (str): Cell name.
+            - sigla (str): Cell abbreviation.
+            - membros (int): Count of members in the cell.
+    """
     return await _q(
         """
         SELECT c.id, c.nome, c.sigla,
@@ -125,7 +184,20 @@ async def get_celulas():
 
 @router.get("/estrutura/pessoas")
 async def get_pessoas():
-    """Diretório: membro + cargos + célula + coordenações (agregados)."""
+    """GET /api/bdu/estrutura/pessoas
+
+    Retrieves a member directory containing names, emails, roles, cells, and department
+    coordinations associated with each member.
+
+    Returns:
+        list[dict]: Directory listing of active members with aggregated:
+            - id (int): Member ID.
+            - nome (str): Full name.
+            - email (str): Email address.
+            - cargos (str): Comma-separated list of roles.
+            - celula (str): Main cell name.
+            - coordenacoes (str): Comma-separated department abbreviations.
+    """
     return await _q(
         """
         SELECT
@@ -149,6 +221,17 @@ async def get_pessoas():
 # COMERCIAL — TASK-026 (filtros temporais em criado_em)
 # ============================================================
 def _periodo(data_inicio, data_fim, coluna="o.criado_em"):
+    """Generates a parameterized SQL WHERE clause and parameter list for date filtering.
+
+    Args:
+        data_inicio (str | None): Start date in YYYY-MM-DD format.
+        data_fim (str | None): End date in YYYY-MM-DD format.
+        coluna (str, optional): The SQL column name to filter on. Defaults to "o.criado_em".
+
+    Returns:
+        tuple[str, list]: A tuple containing the SQL snippet (e.g. ' AND o.criado_em >= %s')
+            and the corresponding list of date values.
+    """
     clausula, params = "", []
     if data_inicio:
         clausula += f" AND {coluna} >= %s"
@@ -164,6 +247,20 @@ async def get_funil(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/comercial/funil
+
+    Calculates sales funnel step counts and values grouped by opportunity status.
+
+    Args:
+        data_inicio (str | None): Start date for opportunity creation (YYYY-MM-DD).
+        data_fim (str | None): End date for opportunity creation (YYYY-MM-DD).
+
+    Returns:
+        list[dict]: Opportunities grouped by funnel stage:
+            - fase (str): Stage name.
+            - qtd (int): Quantity of opportunities in this stage.
+            - valor (float): Sum of values in this stage.
+    """
     clausula, params = _periodo(data_inicio, data_fim)
     return await _q(
         f"""
@@ -184,6 +281,29 @@ async def get_oportunidades(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/comercial/oportunidades
+
+    Lists opportunities with their current funnel stage, customer, values, and origin.
+
+    Args:
+        data_inicio (str | None): Start date for opportunity creation (YYYY-MM-DD).
+        data_fim (str | None): End date for opportunity creation (YYYY-MM-DD).
+
+    Returns:
+        list[dict]: Detailed opportunities list:
+            - id (int): Opportunity ID.
+            - fase (str): Funnel stage.
+            - valor (float): Deal value.
+            - status_terminal (str): Final status (active, won, lost).
+            - criado_em (str): Creation date.
+            - responsaveis (str): Names of team members responsible.
+            - lead (str): Name of the lead source.
+            - cliente (str): Client name.
+            - coordenacao (str): Coordination name.
+            - coordenacao_sigla (str): Coordination abbreviation.
+            - origem (str): Canonical lead source.
+            - motivo_perda (str): Reason for deal loss, if lost.
+    """
     clausula, params = _periodo(data_inicio, data_fim)
     return await _q(
         f"""
@@ -210,6 +330,19 @@ async def get_origens(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/comercial/origens
+
+    Retrieves counts of commercial opportunities grouped by lead origin channel.
+
+    Args:
+        data_inicio (str | None): Start date for opportunity creation (YYYY-MM-DD).
+        data_fim (str | None): End date for opportunity creation (YYYY-MM-DD).
+
+    Returns:
+        list[dict]: Lead origins:
+            - nome (str): Canonical or raw origin name.
+            - qtd (int): Count of opportunities.
+    """
     # Recorte por criado_em (quando a demanda entrou).
     clausula, params = _periodo(data_inicio, data_fim)  # coluna padrao = o.criado_em
     return await _q(
@@ -229,6 +362,19 @@ async def get_motivos_perda(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/comercial/motivos-perda
+
+    Retrieves counts of lost/refused opportunities grouped by reason for loss.
+
+    Args:
+        data_inicio (str | None): Start date in YYYY-MM-DD format.
+        data_fim (str | None): End date in YYYY-MM-DD format.
+
+    Returns:
+        list[dict]: Reasons for loss:
+            - nome (str): Reason description.
+            - qtd (int): Count of lost opportunities.
+    """
     # Recorte por quando a perda aconteceu (finalizado_em), com fallback para
     # criado_em quando finalizado_em estiver nulo (nao derruba linhas).
     clausula, params = _periodo(
@@ -248,6 +394,19 @@ async def get_motivos_perda(
 
 @router.get("/comercial/clientes")
 async def get_clientes_comercial():
+    """GET /api/bdu/comercial/clientes
+
+    Retrieves a list of clients detailing their opportunities, contracts count,
+    and total contract revenue.
+
+    Returns:
+        list[dict]: Client stats sorted by revenue descending:
+            - id (int): Client ID.
+            - nome (str): Client name.
+            - oportunidades (int): Total opportunities count.
+            - contratos (int): Total contracts count.
+            - receita (float): Sum of contract values.
+    """
     return await _q(
         """
         SELECT cli.id, cli.nome,
@@ -268,6 +427,27 @@ async def get_contratos(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/financeiro/contratos
+
+    Retrieves contracts detailing their payments progress, current phase, client,
+    and associated project.
+
+    Args:
+        data_inicio (str | None): Start date in YYYY-MM-DD format (filters active contracts).
+        data_fim (str | None): End date in YYYY-MM-DD format (filters active contracts).
+
+    Returns:
+        list[dict]: Contracts ordered by total value descending:
+            - id (int): Contract ID.
+            - numero (str): Contract number.
+            - valor_total (float): Contract value.
+            - quantidade_parcelas (int): Total payment installments.
+            - fase_atual (str): Contract phase.
+            - cliente (str): Client name.
+            - projeto (str): Associated project name.
+            - parcelas_pagas (int): Paid installments.
+            - parcelas_total (int): Total installments in DB.
+    """
     clausula, params = "", []
     if data_inicio:
         clausula += " AND (c.data_fim IS NULL OR c.data_fim >= %s)"
@@ -299,6 +479,27 @@ async def get_transacoes(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/financeiro/transacoes
+
+    Lists transactions, with bank account details, category, and projects.
+
+    Args:
+        tipo (str | None): Filter by type ('entrada' or 'saida').
+        data_inicio (str | None): Start date in YYYY-MM-DD format.
+        data_fim (str | None): End date in YYYY-MM-DD format.
+
+    Returns:
+        list[dict]: Transactions list (capped at 500):
+            - id (int): Transaction ID.
+            - tipo (str): 'entrada' or 'saida'.
+            - valor (float): Amount.
+            - data (str): Date of transaction.
+            - conta (str): Bank account name.
+            - categoria (str): Category description.
+            - contrato_pagamento_id (int): Installment reference ID.
+            - projeto_externo_id (int): Project ID.
+            - projeto (str): Project name.
+    """
     clausula, params = _periodo(data_inicio, data_fim, coluna="t.data")
     if tipo in ("entrada", "saida"):
         clausula += " AND t.tipo = %s"
@@ -325,7 +526,20 @@ async def get_fluxo(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
-    """Entradas vs. saídas agregadas por mês (YYYY-MM)."""
+    """GET /api/bdu/financeiro/fluxo
+
+    Aggregates incoming (entrada) and outgoing (saida) transaction values by month (YYYY-MM).
+
+    Args:
+        data_inicio (str | None): Start date in YYYY-MM-DD format.
+        data_fim (str | None): End date in YYYY-MM-DD format.
+
+    Returns:
+        list[dict]: Aggregated monthly values:
+            - mes (str): Month in YYYY-MM format.
+            - entrada (float): Sum of inputs.
+            - saida (float): Sum of outputs.
+    """
     clausula, params = _periodo(data_inicio, data_fim, coluna="t.data")
     return await _q(
         f"""
@@ -345,6 +559,19 @@ async def get_contas(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/financeiro/contas
+
+    Retrieves active bank accounts with calculated balance based on transaction type.
+
+    Args:
+        data_inicio (str | None): Start date for transactions (YYYY-MM-DD).
+        data_fim (str | None): End date for transactions (YYYY-MM-DD).
+
+    Returns:
+        list[dict]: Bank accounts and balance:
+            - conta (str): Account name.
+            - saldo (float): Net balance (inputs - outputs) for the period.
+    """
     # Filtro vai no ON (não no WHERE) para manter contas sem movimento no período.
     clausula, params = _periodo(data_inicio, data_fim, coluna="t.data")
     return await _q(
@@ -370,6 +597,25 @@ async def get_servicos_portfolio(
     data_inicio: str | None = Query(default=None),
     data_fim: str | None = Query(default=None),
 ):
+    """GET /api/bdu/servicos/portfolio
+
+    Lists services in the catalog along with metrics for opportunities and associated projects.
+
+    Args:
+        data_inicio (str | None): Start date for filtering opportunities (YYYY-MM-DD).
+        data_fim (str | None): End date for filtering opportunities (YYYY-MM-DD).
+
+    Returns:
+        list[dict]: Catalog of services:
+            - id (int): Service ID.
+            - nome (str): Service name.
+            - sigla (str): Service abbreviation.
+            - coordenacao_id (int): Department ID.
+            - coordenacao (str): Department name.
+            - coordenacao_sigla (str): Department abbreviation.
+            - projetos (int): Count of associated projects in `projeto_servico`.
+            - oportunidades (int): Opportunities count associated with the parent department.
+    """
     # ATENCAO: `oportunidades` e contado por COORDENACAO (nao ha vinculo servico->oportunidade
     # no banco), entao todo servico da mesma coordenacao repete o mesmo numero. NAO some este
     # campo por servico no frontend: agregue por coordenacao. `projetos` vem de projeto_servico,
@@ -397,15 +643,25 @@ async def get_servicos_portfolio(
 # ============================================================
 @router.get("/transversais/facts")
 async def get_transversais_facts():
-    """
-    "Fatos" projeto × membro × cargo × coordenação × célula × cliente × valor.
-    O frontend agrega livremente (A × B × métrica), evitando lógica pesada no backend.
+    """GET /api/bdu/transversais/facts
 
-    Dimensões escolhidas pelo que está populado no banco (contexto-banco-agent):
-    - `projeto_servico` está vazia → serviço não é dimensão viável.
-    - As 5 coordenações pertencem à mesma célula → célula vem do membro
-      (membro_celula), não da coordenação.
-    - `membro_projeto.cargo_id` e `coordenacao_id` estão 100% preenchidos.
+    Retrieves a flattened matrix of projects, members, roles, coordinations, cells,
+    customers, and contract values, allowing the frontend to aggregate freely.
+
+    Returns:
+        list[dict]: List of projects facts:
+            - projeto_id (int): Project ID.
+            - projeto (str): Project name.
+            - descricao (str): Project description.
+            - status (str): Project status.
+            - valor (float): Associated contract value.
+            - membro_id (int): Project member ID.
+            - membro (str): Member name.
+            - coordenacao (str): Coordination department name.
+            - coordenacao_sigla (str): Department abbreviation.
+            - cargo (str): Member project role.
+            - celula (str): Member cell name.
+            - cliente (str): Client name.
     """
     return await _q(
         """

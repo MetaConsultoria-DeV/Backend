@@ -1,7 +1,9 @@
-"""transform.py — Flatten de um card do Pipefy de Vendas → dicts por tabela MySQL.
+"""Module for transforming raw GraphQL Pipefy Comercial card nodes into structured MySQL entity models.
 
-Tabelas-alvo (só colunas existentes): leads, oportunidade, dim_lead_origem,
-dim_motivo_perda, oportunidade_phase_history. Campo sem coluna é descartado.
+This module processes data for the sales pipeline (Sales Pipeline). It extracts lead contact
+profiles, harvesting origins and loss reasons dynamically from multiple fields using precedence
+rules, translates stage labels into terminal statuses, resolves coordination abbreviations,
+and converts phase histories into cronological transition logs.
 """
 
 import re
@@ -20,26 +22,46 @@ from .field_map import (
     PHASE_STATUS_TERMINAL, STATUS_TERMINAL_DEFAULT,
 )
 
+# Logger instance for the Comercial transform module
 logger = logging.getLogger("ingestion.pipefy_comercial.transform")
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# --- Helpers ---
 
 def _parse_datetime(raw: str) -> Optional[datetime]:
+    """Parses standard ISO datetime strings and returns naive datetime objects.
+
+    MySQL DATETIME columns are naive (lack timezone metadata), so tzinfo is discarded.
+
+    Args:
+        raw (str): Raw timestamp string.
+
+    Returns:
+        Optional[datetime]: Naive datetime object, or None if parsing fails.
+    """
     if not raw:
         return None
     for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
                 "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
             dt = datetime.strptime(raw, fmt)
-            return dt.replace(tzinfo=None)  # MySQL datetime é naive
+            return dt.replace(tzinfo=None)  # Discard timezone info
         except ValueError:
             continue
     return None
 
 
 def _parse_money(raw) -> Optional[Decimal]:
-    """Aceita formato BR ('5.300,00') e normalizado da API ('5300.0')."""
+    """Parses Brazilian currency format or clean numbers into Decimal objects.
+
+    Supports inputs like 'R$ 5.300,50' (Brazilian format) and '5300.50' (standard).
+
+    Args:
+        raw: The raw currency value.
+
+    Returns:
+        Optional[Decimal]: Decimal parsed value, or None if parsing fails.
+    """
     if raw is None:
         return None
     s = str(raw).strip()
@@ -47,12 +69,11 @@ def _parse_money(raw) -> Optional[Decimal]:
         return None
     s = re.sub(r"[R$\s]", "", s)
     if "," in s and "." in s:
-        # BR: ponto de milhar, vírgula decimal
+        # Brazilian format with thousands separator dots and decimal comma (e.g. 1.234,56)
         s = s.replace(".", "").replace(",", ".")
     elif "," in s:
-        # só vírgula → decimal BR
+        # Brazilian format with decimal comma only (e.g. 1234,56)
         s = s.replace(",", ".")
-    # só ponto (ou sem separador) → ponto já é decimal
     try:
         return Decimal(s)
     except Exception:
@@ -60,11 +81,26 @@ def _parse_money(raw) -> Optional[Decimal]:
 
 
 def _field_value(f: dict):
-    """checklist/assignee devolvem array_value; demais devolvem value."""
+    """Retrieves the appropriate field value based on field type.
+
+    Args:
+        f (dict): Individual field node from Pipefy.
+
+    Returns:
+        Any: array_value (list) for checklist or assignees, value (str) for standard fields.
+    """
     return f.get("array_value") or f.get("value") or ""
 
 
 def _build_fields_map(card: dict) -> dict:
+    """Creates a flat dictionary of field ID to field value mappings.
+
+    Args:
+        card (dict): Raw card node dictionary.
+
+    Returns:
+        dict: flat key-value dictionary of custom fields.
+    """
     fmap = {}
     for f in card.get("fields", []):
         fmap[f["field"]["id"]] = _field_value(f)
@@ -72,25 +108,45 @@ def _build_fields_map(card: dict) -> dict:
 
 
 def _as_text(val) -> str:
-    """Junta listas (assignee/checklist) num texto legível."""
+    """Concatenates lists (checklist, assignees) into a comma-separated string.
+
+    Args:
+        val: The raw value.
+
+    Returns:
+        str: Cleaned string representation.
+    """
     if isinstance(val, list):
         return ", ".join(str(v) for v in val if v not in (None, ""))
     return str(val).strip() if val else ""
 
 
 def _resolve_coord_sigla(card: dict, fmap: dict) -> Optional[str]:
-    """Coordenação: tenta os campos label_select, depois as labels do card.
-    Só retorna sigla que exista na tabela `coordenacao` (TD/GN/OP/CE)."""
+    """Resolves the coordination cell sigla from card labels and custom fields.
+
+    Extracts coordination names from custom fields (`how_hot_is_this_opportunity`, `engenharia`)
+    and the card's visual tags/labels. Matches them against the allowed coordination siglas
+    (TD, GN, OP, CE, DM).
+
+    Args:
+        card (dict): Raw card node.
+        fmap (dict): Flattened custom fields map.
+
+    Returns:
+        Optional[str]: Mapped abbreviation (sigla) or None.
+    """
     candidates = []
+    # Collect candidates from label select fields
     for fid in COORD_LABEL_FIELDS:
         candidates.append(_as_text(fmap.get(fid, "")))
+    # Collect candidates from visual card labels
     for lbl in card.get("labels", []) or []:
         candidates.append((lbl.get("name") or "").strip())
 
     for cand in candidates:
         if not cand:
             continue
-        # campo pode trazer "OP, CE" — pega o primeiro token conhecido
+        # Split candidate strings that contain list separators (e.g. 'OP, CE')
         for token in re.split(r"[,;/]", cand):
             sigla = COORD_LABEL_TO_SIGLA.get(token.strip())
             if sigla:
@@ -99,13 +155,20 @@ def _resolve_coord_sigla(card: dict, fmap: dict) -> Optional[str]:
 
 
 def _build_phase_events(card: dict) -> list[dict]:
-    """Converte phases_history em eventos de transição (append-only, idempotente).
+    """Converts a card's phases history into chronological phase transition logs.
 
-    Um evento por ENTRADA em fase, em ordem cronológica. A duração da fase ANTERIOR
-    vem do campo `duration` (segundos) daquela fase.
+    Sorts phase logs chronologically by `firstTimeIn`.
+    Generates a unique `external_event_id` in the format `{card_id}:{phase_id}:{moved_iso}`
+    to ensure idempotency. Calculates duration spent in the previous phase.
+
+    Args:
+        card (dict): Raw card node.
+
+    Returns:
+        list[dict]: chronological phase transition dictionaries ready for insertion.
     """
     history = card.get("phases_history", []) or []
-    # Ordena por firstTimeIn
+    # Parse and filter transitions containing valid timestamps
     parsed = []
     for h in history:
         ts = _parse_datetime(h.get("firstTimeIn", ""))
@@ -115,7 +178,7 @@ def _build_phase_events(card: dict) -> list[dict]:
             "phase_id":   str(h["phase"]["id"]),
             "phase_nome": h["phase"]["name"].strip(),
             "moved_at":   ts,
-            "duration":   h.get("duration"),  # segundos na fase (pode ser None)
+            "duration":   h.get("duration"),  # Duration in seconds (can be None)
         })
     parsed.sort(key=lambda x: x["moved_at"])
 
@@ -130,25 +193,41 @@ def _build_phase_events(card: dict) -> list[dict]:
             "to_phase_id":     cur["phase_id"],
             "to_phase_nome":   cur["phase_nome"],
             "moved_at":        cur["moved_at"],
-            "moved_by":        None,  # phases_history não expõe o autor
+            "moved_by":        None,  # Not exposed in GraphQL phase history
             "duration_previous_phase_seconds": (
                 int(prev["duration"]) if prev and prev["duration"] is not None else None
             ),
             "external_source":   EXTERNAL_SOURCE_PHASE,
             "external_event_id": f"{card_id}:{cur['phase_id']}:{moved_iso}",
-            # FK preenchida no load
-            "oportunidade_id": None,
+            "oportunidade_id": None,  # Resolved during load
         })
     return events
 
 
-# ── Função pública ──────────────────────────────────────────────────────────
+# --- Public API ---
 
 def transform_card(card: dict) -> dict:
+    """Transforms a raw Pipefy Sales card node into structured commercial entity models.
+
+    Args:
+        card (dict): Raw GraphQL Sales pipeline card node.
+
+    Returns:
+        dict: A dictionary containing structured entity maps:
+            - card_id (str): Raw card ID.
+            - lead (dict): Cleaned lead profile fields.
+            - oportunidade (dict): Structured opportunity fields (including phase, terminal status).
+            - origens (list[dict]): Extracted lead origin raw values.
+            - motivos (list[dict]): Extracted loss reason raw values.
+            - _origem_ref (dict | None): Selected primary origin reference based on priority.
+            - _motivo_ref (dict | None): Selected primary loss reason reference based on priority.
+            - _coord_sigla (str | None): Resolved coordination cell sigla.
+            - phase_events (list[dict]): chronological phase transition log dictionaries.
+    """
     fmap = _build_fields_map(card)
     card_id = card["id"]
 
-    # ── lead ─────────────────────────────────────────────────────────────────
+    # --- Lead Profile ---
     lead = {
         "nome":            (_as_text(fmap.get(F_NOME)) or card.get("title", "").strip())[:200],
         "email":           _as_text(fmap.get(F_EMAIL))[:200] or None,
@@ -159,13 +238,15 @@ def transform_card(card: dict) -> dict:
         "external_id":     card_id,
     }
 
-    # ── dim_lead_origem (auto-vivify raw) ────────────────────────────────────
+    # --- Lead Origin (dim_lead_origem) ---
+    # Harvest lead origins across multiple stages
     origens = []
     for source_field, fid in ORIGEM_FIELDS.items():
         raw = _as_text(fmap.get(fid))
         if raw:
             origens.append({"source_field": source_field, "raw_value": raw})
-    # qual origem a oportunidade aponta (prioridade ld > start_form)
+            
+    # Resolve primary origin reference using precedence configuration (LD overrides Start Form)
     origem_ref = None
     for sf in ORIGEM_PRIORITY:
         match = next((o for o in origens if o["source_field"] == sf), None)
@@ -173,7 +254,8 @@ def transform_card(card: dict) -> dict:
             origem_ref = match
             break
 
-    # ── dim_motivo_perda (auto-vivify raw) ───────────────────────────────────
+    # --- Loss Reasons (dim_motivo_perda) ---
+    # Harvest loss reasons across all stages
     motivos = []
     motivo_ref = None
     for fid in MOTIVO_PERDA_FIELDS:
@@ -181,13 +263,15 @@ def transform_card(card: dict) -> dict:
         if raw:
             entry = {"source_field": fid, "raw_value": raw}
             motivos.append(entry)
-            if motivo_ref is None:  # primeiro na ordem de prioridade
+            # Select the first non-empty field encountered as the primary reason
+            if motivo_ref is None:
                 motivo_ref = entry
 
-    # ── oportunidade ─────────────────────────────────────────────────────────
+    # --- Opportunity ---
     current_phase = card.get("current_phase") or {}
     fase_id = str(current_phase.get("id") or "")
     fase_nome = (current_phase.get("name") or "").strip()
+    # Resolve the status terminal category
     status_terminal = PHASE_STATUS_TERMINAL.get(fase_id, STATUS_TERMINAL_DEFAULT)
 
     oportunidade = {
@@ -200,12 +284,11 @@ def transform_card(card: dict) -> dict:
         "finalizado_em":   _parse_datetime(card.get("finished_at", "")),
         "external_source": EXTERNAL_SOURCE,
         "external_id":     card_id,
-        # FKs resolvidas no load
-        "lead_id":         None,
-        "cliente_id":      None,   # fica NULL até virar contrato
-        "origem_id":       None,
-        "motivo_perda_id": None,
-        "coordenacao_id":  None,
+        "lead_id":         None,   # Populated during load
+        "cliente_id":      None,   # Remains NULL until contract creation
+        "origem_id":       None,   # Populated during load
+        "motivo_perda_id": None,   # Populated during load
+        "coordenacao_id":  None,   # Populated during load
     }
 
     return {

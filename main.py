@@ -27,6 +27,14 @@ logger = logging.getLogger('pape')
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Context manager to handle FastAPI application lifespan events.
+
+    Initializes the MySQL connection pool on startup and closes it on shutdown
+    to release all database connections.
+
+    Args:
+        app (FastAPI): The FastAPI application instance.
+    """
     init_pool()
     yield
     close_pool()
@@ -59,6 +67,18 @@ app.add_middleware(
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Global exception handler to capture and log any unhandled exceptions.
+
+    Logs the exception with stack trace and returns a generic HTTP 500 error
+    response to the client.
+
+    Args:
+        request (Request): The request that caused the exception.
+        exc (Exception): The unhandled exception instance.
+
+    Returns:
+        JSONResponse: A standard HTTP 500 JSON response.
+    """
     logger.exception('Erro não tratado em %s', request.url.path)
     return JSONResponse(status_code=500, content={'detail': 'Erro interno do servidor'})
 
@@ -72,7 +92,18 @@ ADMIN_API_TOKEN = os.getenv('ADMIN_API_TOKEN', '')
 
 
 def require_admin_token(authorization: str | None = Header(default=None)) -> None:
-    """Exige 'Authorization: Bearer <ADMIN_API_TOKEN>'. Usado nas rotas de escrita."""
+    """Dependency to validate admin token header authentication.
+
+    Requires an HTTP header containing 'Authorization: Bearer <ADMIN_API_TOKEN>'.
+    Used to protect database mutating routes (POST, PUT, DELETE).
+
+    Args:
+        authorization (str | None): The Authorization header value. Defaults to Header(default=None).
+
+    Raises:
+        HTTPException: 503 Service Unavailable if backend token is not set.
+        HTTPException: 401 Unauthorized if token is missing or invalid.
+    """
     if not ADMIN_API_TOKEN:
         raise HTTPException(status_code=503, detail='Servidor sem ADMIN_API_TOKEN configurado')
     prefix = 'Bearer '
@@ -84,14 +115,33 @@ def require_admin_token(authorization: str | None = Header(default=None)) -> Non
 
 @app.get('/api/health')
 async def health():
+    """GET /api/health
+
+    Basic health check endpoint to verify backend status.
+
+    Returns:
+        dict: A dictionary indicating status. E.g. {'status': 'ok'}.
+    """
     return {'status': 'ok'}
 
 
 @app.get('/api/projetos', response_model=list[Projeto])
 async def get_projetos(gerente_id: int | None = None):
+    """GET /api/projetos
+
+    Retrieves a list of projects with active or non-canceled contracts.
+    Can be filtered to only return projects assigned to a specific project manager.
+
+    Args:
+        gerente_id (int | None): The database ID of the project manager. Defaults to None.
+
+    Returns:
+        list[dict]: A list of projects matching the criteria.
+    """
     manager_filter = ''
     params = None
     if gerente_id is not None:
+        # Filtra projetos onde o membro é gerente ativo (data_saida IS NULL)
         manager_filter = '''
       AND EXISTS (
         SELECT 1
@@ -130,6 +180,14 @@ async def get_projetos(gerente_id: int | None = None):
 
 @app.get('/api/projetos/all', response_model=list[ProjetoListItem])
 async def get_all_projetos():
+    """GET /api/projetos/all
+
+    Retrieves a list of all projects in the database with their current status
+    and project managers. Omit temporary contract numbers (starting with CONTRATO-TEMP).
+
+    Returns:
+        list[dict]: A list of project objects.
+    """
     query = '''
     SELECT 
         pe.id, 
@@ -156,6 +214,7 @@ async def get_all_projetos():
     
     projetos = []
     for r in resultado:
+        # Filtra números de contratos temporários
         projetos.append({
             'id': r['id'],
             'nome': r['nome'],
@@ -167,6 +226,18 @@ async def get_all_projetos():
 
 
 async def validate_project_manager(respondente_nome: str, projeto_externo_id: int) -> bool:
+    """Checks if a member is currently assigned as an active manager for a project.
+
+    Queries the `membro_projeto` table to match the member's name and verifies
+    if they hold a role matching '%gerente%projeto%' with no departure date (data_saida is NULL).
+
+    Args:
+        respondente_nome (str): The name of the member.
+        projeto_externo_id (int): The database ID of the project.
+
+    Returns:
+        bool: True if the member is an active manager of the project, False otherwise.
+    """
     query = '''
     SELECT mp.id
     FROM membro_projeto mp
@@ -193,6 +264,16 @@ async def update_project_orientador_if_unknown(
     possui_orientador: str,
     nome_orientador: str | None,
 ) -> None:
+    """Updates the technical advisor info of a project if it has not been defined yet.
+
+    If `possui_orientador` is NULL in the database, this function will set the values
+    for `possui_orientador` (1 or 0) and `nome_orientador` (string name or None).
+
+    Args:
+        projeto_externo_id (int): The database ID of the project.
+        possui_orientador (str): Affirmation string ('Sim' or 'Não').
+        nome_orientador (str | None): The name of the technical advisor.
+    """
     query = '''
     UPDATE projeto_externo
     SET possui_orientador = %s,
@@ -210,6 +291,18 @@ async def update_project_orientador_if_unknown(
 
 
 def parse_motivos_atraso(raw_motivos) -> list[str]:
+    """Decodes JSON-encoded delay reasons and normalizes them into canonical categories.
+
+    Takes a JSON-string, list, or string of reasons, cleans unicode escapes, and maps
+    known variations to their canonical forms (e.g., 'Escopo mal definido' becomes
+    'Indefinição e(ou) fuga de escopo').
+
+    Args:
+        raw_motivos (Any): The raw motivos data from database/JSON.
+
+    Returns:
+        list[str]: A list of clean canonical delay reasons.
+    """
     if not raw_motivos:
         return []
 
@@ -250,7 +343,7 @@ def parse_motivos_atraso(raw_motivos) -> list[str]:
             for search, replace in replacements.items():
                 motivo_str = motivo_str.replace(search, replace)
             
-            # Map variations to canonical reasons
+            # Mapeamento para motivos canônicos de atraso
             norm_mapping = {
                 "Escopo mal definido": "Indefinição e(ou) fuga de escopo",
                 "Mudança de requisitos": "Indefinição e(ou) fuga de escopo",
@@ -274,6 +367,17 @@ def parse_motivos_atraso(raw_motivos) -> list[str]:
 
 
 def count_motivos_atraso(rows: list[dict]) -> list[dict]:
+    """Counts the occurrences of delay reasons from a list of rows.
+
+    Parses reasons from each row and aggregates the total counts, returning
+    them sorted in descending order of frequency.
+
+    Args:
+        rows (list[dict]): A list of database rows containing 'motivos_atraso'.
+
+    Returns:
+        list[dict]: A list of objects with 'name' (reason) and 'value' (count) keys.
+    """
     counts: dict[str, int] = {}
 
     for row in rows:
@@ -287,6 +391,23 @@ def count_motivos_atraso(rows: list[dict]) -> list[dict]:
 
 
 def build_riscos_dashboard(rows: list[dict]) -> dict:
+    """Builds metrics and grids for the Risks section of the PAPE dashboard.
+
+    Aggregates projects currently at risk of delay, generates a matrix of reasons
+    distributed by department coordination, and lists scores for budget sufficiency,
+    client communication, and team training.
+
+    Args:
+        rows (list[dict]): Latest responses for each project containing risk indicators.
+
+    Returns:
+        dict: Risk analytics containing:
+            - motivos_por_coordenacao (list[dict]): Matrix of reasons by coordination department.
+            - projetos_em_risco (list[dict]): List of detailed project risk descriptions.
+            - suficiencia_orcamento (list[dict]): Budget scores sorted.
+            - comunicacao_cliente (list[dict]): Communication scores sorted.
+            - capacitacao_equipe (list[dict]): Training scores sorted.
+    """
     CANONICAL_MOTIVOS = [
         "Capacidade técnica",
         "Comunicação com cliente",
@@ -303,7 +424,7 @@ def build_riscos_dashboard(rows: list[dict]) -> dict:
         "Tecnologia e Desenvolvimento"
     ]
 
-    # Initialize the grid with 0 for all canonical reasons and canonical coordinations
+    # Inicializa a matriz de motivos por coordenação com 0
     motivos_por_coordenacao = {
         motivo: {coord: 0 for coord in CANONICAL_COORDENACOES}
         for motivo in CANONICAL_MOTIVOS
@@ -331,7 +452,7 @@ def build_riscos_dashboard(rows: list[dict]) -> dict:
             })
 
             for motivo in motivos:
-                # If there's an unknown motive (like 'Outro'), skip it or add it dynamically
+                # Se houver um motivo customizado, inicializa dinamicamente se necessário
                 if motivo not in motivos_por_coordenacao:
                     if motivo and motivo not in ('Outro', ''):
                         motivos_por_coordenacao[motivo] = {coord: 0 for coord in CANONICAL_COORDENACOES}
@@ -362,7 +483,6 @@ def build_riscos_dashboard(rows: list[dict]) -> dict:
             })
 
     matriz_motivos = []
-    # Pre-ordered keys: canonical first
     ordered_keys = CANONICAL_MOTIVOS + [k for k in motivos_por_coordenacao if k not in CANONICAL_MOTIVOS]
     
     for motivo in ordered_keys:
@@ -386,6 +506,14 @@ def build_riscos_dashboard(rows: list[dict]) -> dict:
 
 
 def parse_score(value) -> int | None:
+    """Parses and validates a numerical score to ensure it falls within the 1-5 range.
+
+    Args:
+        value (Any): The raw score value.
+
+    Returns:
+        int | None: The validated score as an integer, or None if invalid.
+    """
     if value is None or value == '':
         return None
 
@@ -401,6 +529,23 @@ def parse_score(value) -> int | None:
 
 
 def build_metodo_escopo_dashboard(rows: list[dict]) -> dict:
+    """Builds metrics for methodology effectiveness, rework, scope definitions, and training.
+
+    Calculates scores for rework levels, scope definition, team training, and methodology
+    effectiveness, and identifies projects needing attention due to low scores (<= 2).
+
+    Args:
+        rows (list[dict]): Latest responses for each project.
+
+    Returns:
+        dict: Scope and methodology analytics containing:
+            - retrabalho (list[dict]): Rework scores.
+            - variacao_escopo (list[dict]): Scope definition scores.
+            - capacitacao_equipe (list[dict]): Team training scores.
+            - eficacia_metodologia (list[dict]): Methodology effectiveness scores.
+            - pontos_atencao (list[dict]): Projects with low scores.
+            - medias (dict): Average scores for each metric.
+    """
     fields = [
         ('nivel_retrabalho', 'retrabalho', 'Retrabalho'),
         ('variacao_escopo', 'variacao_escopo', 'Escopo definido'),
@@ -456,6 +601,14 @@ def build_metodo_escopo_dashboard(rows: list[dict]) -> dict:
 
 
 def average_score(items: list[dict]) -> float:
+    """Calculates the average value from a list of dictionaries.
+
+    Args:
+        items (list[dict]): List of dictionaries with a 'value' key.
+
+    Returns:
+        float: Calculated mean rounded to one decimal place, or 0 if empty.
+    """
     if not items:
         return 0
 
@@ -463,6 +616,16 @@ def average_score(items: list[dict]) -> float:
 
 
 def has_orientador(row: dict) -> bool:
+    """Determines if a project has technical advisory based on row properties.
+
+    Checks flags like `possui_orientador` (Sim, 1, True) and technical advisor name.
+
+    Args:
+        row (dict): Database row representing a project or monitoring record.
+
+    Returns:
+        bool: True if the project has an advisor, False otherwise.
+    """
     raw_value = row.get('possui_orientador')
     orientador = row.get('nome_orientador')
 
@@ -475,6 +638,27 @@ def has_orientador(row: dict) -> bool:
 
 
 def build_cliente_orientacao_dashboard(rows: list[dict]) -> dict:
+    """Builds dashboard analytics for client relationships and technical advisor metrics.
+
+    Computes client communication, trust, satisfaction, value perception, and aggregates
+    technical advisor availability and effectiveness scores.
+
+    Args:
+        rows (list[dict]): Latest responses for each project.
+
+    Returns:
+        dict: Client relationship and technical advisor analytics containing:
+            - comunicacao_cliente (list[dict]): Client communication scores.
+            - confianca_cliente (list[dict]): Client trust scores.
+            - satisfacao_cliente (list[dict]): Client satisfaction scores.
+            - valorizacao_cliente (list[dict]): Client value perception scores.
+            - orientadores (dict): Advisor effectiveness/availability lists.
+            - impactos (list[dict]): Client impact descriptions.
+            - pontos_atencao (list[dict]): Low-scoring client relation indicators.
+            - quantidade_orientadores (int): Distinct active advisors count.
+            - projetos_com_orientacao_pct (float): Percentage of projects with an advisor.
+            - medias (dict): Average scores.
+    """
     fields = [
         ('comunicacao_cliente', 'comunicacao_cliente', 'Comunicação efetiva'),
         ('abertura_cliente', 'confianca_cliente', 'Confiança do cliente'),
@@ -582,6 +766,14 @@ def build_cliente_orientacao_dashboard(rows: list[dict]) -> dict:
 
 
 def parse_csv_values(raw_value) -> list[str]:
+    """Parses a raw CSV string or list into a clean list of strings.
+
+    Args:
+        raw_value (Any): Comma-separated string or list.
+
+    Returns:
+        list[str]: A list of clean trimmed strings.
+    """
     if not raw_value:
         return []
 
@@ -592,6 +784,16 @@ def parse_csv_values(raw_value) -> list[str]:
 
 
 def normalize_yes(value) -> bool:
+    """Normalizes affirmative values into a boolean.
+
+    Matches variations like '1', 'Sim', 'True', 'Yes'.
+
+    Args:
+        value (Any): The value to check.
+
+    Returns:
+        bool: True if it matches an affirmative, False otherwise.
+    """
     if isinstance(value, str):
         return value.strip().lower() in ('1', 'sim', 'true', 'yes')
 
@@ -599,6 +801,14 @@ def normalize_yes(value) -> bool:
 
 
 def story_points_midpoint(value: str | None) -> int | None:
+    """Maps a sprint story points percentage range to its midpoint integer value.
+
+    Args:
+        value (str | None): Range string (e.g. '21-40%').
+
+    Returns:
+        int | None: Midpoint integer value (e.g. 30), or None if invalid.
+    """
     if not value:
         return None
 
@@ -613,6 +823,14 @@ def story_points_midpoint(value: str | None) -> int | None:
 
 
 def completion_midpoint(value: str | None) -> int | None:
+    """Maps a project completion percentage range to its midpoint integer value.
+
+    Args:
+        value (str | None): Range string (e.g. '41-60%').
+
+    Returns:
+        int | None: Midpoint integer value (e.g. 50), or None if invalid.
+    """
     if not value:
         return None
 
@@ -627,6 +845,22 @@ def completion_midpoint(value: str | None) -> int | None:
 
 
 def build_agil_dashboard(rows: list[dict]) -> dict:
+    """Builds Agile metrics dashboard analytics.
+
+    Summarizes agile projects metrics such as story points ranges, sprint impediments,
+    customer impact, PMO interventions, and 1-on-1 requirements.
+
+    Args:
+        rows (list[dict]): Agile monitoring rows.
+
+    Returns:
+        dict: Agile analytics containing:
+            - story_points (list[dict]): Story points counts.
+            - impedimentos (list[dict]): Impediment type counts.
+            - impactos (list[dict]): Customer impact counts.
+            - projetos (list[dict]): Detailed list of agile projects.
+            - resumo (dict): Summaries metrics (averages, totals).
+    """
     story_counts: dict[str, int] = {}
     impedimento_counts: dict[str, int] = {}
     impacto_counts: dict[str, int] = {}
@@ -701,6 +935,14 @@ def build_agil_dashboard(rows: list[dict]) -> dict:
 
 
 def format_dashboard_date(value) -> str:
+    """Formats a datetime/date object or ISO string to standard DD/MM/YYYY format.
+
+    Args:
+        value (Any): Date value to format.
+
+    Returns:
+        str: Date string in DD/MM/YYYY format, or the string representation fallback.
+    """
     if not value:
         return 'Sem data'
 
@@ -714,6 +956,25 @@ def format_dashboard_date(value) -> str:
 
 
 def build_detalhe_dashboard(rows: list[dict], selected_project_id: int | None = None) -> dict:
+    """Builds detailed historical data for a specific project focus.
+
+    Determines the focus project (defaults to the worst schedule status or highest
+    completion if not specified) and aggregates its timeline history, metrics,
+    delay reasons, and a summary list of all projects.
+
+    Args:
+        rows (list[dict]): Full database log of monitoring records.
+        selected_project_id (int | None): Selected project ID for focus. Defaults to None.
+
+    Returns:
+        dict: Focus project analytics containing:
+            - projeto_foco (dict): Basic focus project information.
+            - metricas (dict): Focus project latest metrics.
+            - andamento (list[dict]): Project progression range history midpoints.
+            - motivos_atraso (list[dict]): Aggregated delay reasons for the project.
+            - historico (list[dict]): Complete historical list of submissions.
+            - projetos (list[dict]): Sorted list of all projects and status.
+    """
     if not rows:
         return {
             'projeto_foco': None,
@@ -854,6 +1115,32 @@ def build_detalhe_dashboard(rows: list[dict], selected_project_id: int | None = 
 
 @app.get('/api/projetos/{projeto_id}')
 async def get_projeto_detalhes(projeto_id: int):
+    """GET /api/projetos/{projeto_id}
+
+    Retrieves detailed info for a single project.
+    Fetches the project description, linked contract details (value and contract number),
+    associated services and department coordinations, active team members (with their roles
+    and department affiliations), and a list of all historical monitoring logs.
+
+    Args:
+        projeto_id (int): The database ID of the project.
+
+    Returns:
+        dict: Detailed project data containing:
+            - id (int): Project ID.
+            - nome (str): Project name.
+            - descricao (str): Project description.
+            - data_inicio (str): Start date.
+            - numero_contrato (str): Contract number.
+            - valor_total (float): Contract total value.
+            - possui_orientador (bool): Advisor flag.
+            - nome_orientador (str): Advisor name.
+            - status (str): Project status (ativo, finalizado, pausado).
+            - servicos (list[dict]): Services associated with the project.
+            - coordenacoes (list[dict]): Coordinations department names.
+            - membros (list[dict]): Team members active in the project.
+            - acompanhamentos (list[dict]): List of PAPE monitoring submissions history.
+    """
     query = '''
     SELECT pe.id, pe.nome, pe.descricao, pe.descricao_projeto, pe.data_inicio, c.numero as numero_contrato,
            c.valor_total, pe.possui_orientador, pe.nome_orientador, pe.status
@@ -924,6 +1211,21 @@ async def get_projeto_detalhes(projeto_id: int):
 
 @app.put('/api/projetos/{projeto_id}')
 async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Depends(require_admin_token)):
+    """PUT /api/projetos/{projeto_id}
+
+    Updates fields of an existing project and its relational dependencies.
+    Requires header admin token authentication.
+    Validates contract uniqueness before modifying contracts. Updates associated
+    services and dynamically syncs active project members, project manager, and technical advisor.
+
+    Args:
+        projeto_id (int): Database ID of the project to update.
+        data (ProjetoUpdate): Pydantic body containing the update payload.
+        _auth (None): Depends on require_admin_token dependency.
+
+    Returns:
+        dict: A dictionary indicating success. E.g. {'success': True, 'message': '...'}
+    """
     check_query = 'SELECT id FROM projeto_externo WHERE id = %s'
     exists = await asyncio.to_thread(execute_query, check_query, (projeto_id,), fetch_one=True)
     if not exists:
@@ -1110,6 +1412,12 @@ def _delete_projeto_tx(projeto_id: int) -> bool:
     projeto mas com projeto_externo_id de OUTRO projeto. Por isso a limpeza é feita
     por projeto_externo_id OU pelos contratos do projeto (contrato_id IN ...), senão
     o DELETE FROM contrato falha com erro 1451 (fk_acomp_contrato / fk_cp_contrato).
+
+    Args:
+        projeto_id (int): Database ID of the project.
+
+    Returns:
+        bool: True if project exists and deleted, False otherwise.
     """
     with transaction() as conn:
         cur = conn.cursor()
@@ -1150,6 +1458,18 @@ def _delete_projeto_tx(projeto_id: int) -> bool:
 
 @app.delete('/api/projetos/{projeto_id}')
 async def delete_projeto(projeto_id: int, _auth: None = Depends(require_admin_token)):
+    """DELETE /api/projetos/{projeto_id}
+
+    Deletes a project and all associated cascading dependencies atomically.
+    Requires header admin token authentication.
+
+    Args:
+        projeto_id (int): Database ID of the project to delete.
+        _auth (None): Depends on require_admin_token dependency.
+
+    Returns:
+        dict: E.g. {'success': True, 'message': '...'}
+    """
     existe = await asyncio.to_thread(_delete_projeto_tx, projeto_id)
     if not existe:
         raise HTTPException(status_code=404, detail='Projeto não encontrado')
@@ -1157,6 +1477,14 @@ async def delete_projeto(projeto_id: int, _auth: None = Depends(require_admin_to
 
 
 def _delete_acompanhamento_tx(acompanhamento_id: int) -> bool:
+    """Deletes a PAPE monitoring record and conditional tables in a transaction.
+
+    Args:
+        acompanhamento_id (int): Database ID of the monitoring record.
+
+    Returns:
+        bool: True if record exists and deleted, False otherwise.
+    """
     with transaction() as conn:
         cur = conn.cursor()
         cur.execute('SELECT id FROM acompanhamento_projeto WHERE id = %s', (acompanhamento_id,))
@@ -1171,6 +1499,18 @@ def _delete_acompanhamento_tx(acompanhamento_id: int) -> bool:
 
 @app.delete('/api/acompanhamentos/{acompanhamento_id}')
 async def delete_acompanhamento(acompanhamento_id: int, _auth: None = Depends(require_admin_token)):
+    """DELETE /api/acompanhamentos/{acompanhamento_id}
+
+    Deletes an individual project monitoring record.
+    Requires header admin token authentication.
+
+    Args:
+        acompanhamento_id (int): Database ID of the record to delete.
+        _auth (None): Depends on require_admin_token dependency.
+
+    Returns:
+        dict: E.g. {'success': True, 'message': '...'}
+    """
     existe = await asyncio.to_thread(_delete_acompanhamento_tx, acompanhamento_id)
     if not existe:
         raise HTTPException(status_code=404, detail='Acompanhamento não encontrado')
@@ -1180,6 +1520,15 @@ async def delete_acompanhamento(acompanhamento_id: int, _auth: None = Depends(re
 
 @app.get('/api/coordenacoes', response_model=list[Coordenacao])
 async def get_coordenacoes():
+    """GET /api/coordenacoes
+
+    Retrieves a list of all coordination departments in the organization.
+
+    Returns:
+        list[dict]: List of coordination departments:
+            - id (int): Coordination ID.
+            - nome (str): Coordination name.
+    """
     query = 'SELECT id, nome FROM coordenacao ORDER BY nome'
     resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
     return resultado or []
@@ -1187,6 +1536,14 @@ async def get_coordenacoes():
 
 @app.get('/api/servicos', response_model=list[ServicosPorCoordenacao])
 async def get_servicos():
+    """GET /api/servicos
+
+    Retrieves all services offered in the catalog, grouped under their
+    respective parent coordination department.
+
+    Returns:
+        list[dict]: Services grouped by coordination department.
+    """
     query = '''
     SELECT s.id, s.nome, s.sigla,
            c.id as coordenacao_id, c.nome as coordenacao_nome, c.sigla as coordenacao_sigla
@@ -1218,6 +1575,16 @@ async def get_servicos():
 
 @app.get('/api/membros', response_model=list[Membro])
 async def get_membros():
+    """GET /api/membros
+
+    Retrieves a list of active team members who hold project manager roles.
+
+    Returns:
+        list[dict]: List of project managers:
+            - id (int): Member ID.
+            - nome (str): Manager name.
+            - email (str): Manager email.
+    """
     query = '''
     SELECT DISTINCT m.id, m.nome, m.email
     FROM membro m
@@ -1233,6 +1600,14 @@ async def get_membros():
 
 @app.get('/api/membros-por-coordenacao', response_model=list[MembrosPorCoordenacao])
 async def get_membros_por_coordenacao():
+    """GET /api/membros-por-coordenacao
+
+    Retrieves all members grouped under their respective coordination departments.
+    Adds a fallback department group (id=0) for members without department assignments.
+
+    Returns:
+        list[dict]: Members grouped by coordination department.
+    """
     query = '''
     SELECT m.id, m.nome, m.email,
            c.id as coordenacao_id, c.nome as coordenacao_nome, c.sigla as coordenacao_sigla
@@ -1277,6 +1652,11 @@ async def get_membros_por_coordenacao():
 
 
 async def send_to_n8n(data: dict):
+    """Asynchronously dispatches form submission payloads to an external n8n webhook.
+
+    Args:
+        data (dict): Payload containing form submission details.
+    """
     try:
         async with httpx.AsyncClient() as client:
             await client.post(N8N_WEBHOOK_URL, json=data, timeout=30.0)
@@ -1285,6 +1665,19 @@ async def send_to_n8n(data: dict):
 
 
 def _submit_pape_tx(data: PapeFormData) -> int:
+    """Inserts PAPE monitoring form submission details atomically within a transaction.
+
+    Handles creation of the primary `acompanhamento_projeto` record, and inserts into
+    sub-tables like `acomp_orientador` (if the project has a technical advisor),
+    `acomp_sprint` (if using Agile methodology), and `acomp_impedimento` (if sprint
+    impediments occurred).
+
+    Args:
+        data (PapeFormData): validated PAPE form submission model.
+
+    Returns:
+        int: The database auto-increment ID (acomp_id) of the inserted monitoring record.
+    """
     motivos_str = json.dumps(data.motivos_atraso) if data.motivos_atraso else None
     orcamento_nao_necessario = 1 if data.suficiencia_orcamento == 'Não necessitou' else 0
     suficiencia_nota = (
@@ -1352,6 +1745,20 @@ def _submit_pape_tx(data: PapeFormData) -> int:
 
 @app.post('/api/pape')
 async def submit_pape(data: PapeFormData, background_tasks: BackgroundTasks):
+    """POST /api/pape
+
+    Handles new project monitoring responses from project managers.
+    Validates that the respondent is indeed the active project manager. Inserts
+    monitoring records atomically, updates the project's advisor info if unset,
+    and schedules background webhook dispatch tasks to n8n.
+
+    Args:
+        data (PapeFormData): The validated form submission schema.
+        background_tasks (BackgroundTasks): FastAPI background task manager.
+
+    Returns:
+        dict: E.g. {'success': True, 'message': '...', 'acompanhamento_id': int}
+    """
     is_project_manager = await validate_project_manager(
         data.respondente_nome,
         data.projeto_externo_id,
@@ -1390,6 +1797,35 @@ async def get_dashboard_pape(
     data_inicio: str | None = None,
     data_fim: str | None = None
 ):
+    """GET /api/dashboard/pape
+
+    Retrieves aggregated project metrics for the PAPE dashboard.
+    Fetches satisfaction metrics, project schedule status counts, completion ranges,
+    delay reasons, agile sprint progress, client relationship indices, technical advisor
+    effectiveness, and historical details. Can be filtered by date range and selected project.
+
+    Args:
+        projeto_id (int | None): ID of the project to focus on in detailed breakdown. Defaults to None.
+        data_inicio (str | None): Filter start date in YYYY-MM-DD format. Defaults to None.
+        data_fim (str | None): Filter end date in YYYY-MM-DD format. Defaults to None.
+
+    Returns:
+        dict: Aggregated dashboard analytics:
+            - total_projetos (int): Count of distinct active projects.
+            - total_respostas (int): Count of total monitoring submissions in the period.
+            - media_satisfacao (float): Average client satisfaction score.
+            - metodologias (dict): Count of projects by management model.
+            - status_cronograma (dict): Count of projects by schedule status.
+            - pct_conclusao (dict): Count of projects by completion range.
+            - motivos_atraso (list): Sorted counts of delay reasons.
+            - projetos_atuais (list): List of active projects with latest status.
+            - riscos (dict): Aggregated risk indicators.
+            - metodo_escopo (dict): Scope and methodology metrics.
+            - cliente_orientacao (dict): Client relation and technical advisor metrics.
+            - agil (dict): Agile project metrics.
+            - detalhe (dict): Focus project detailed metrics.
+            - datas_disponiveis (list): List of dates with monitoring responses in descending order.
+    """
     try:
         sub_params = []
         sub_date_filters = ""
@@ -1694,7 +2130,14 @@ async def get_dashboard_pape(
 
 
 def parse_valor_projeto(valor_str: str | None) -> float:
-    """Converte string no formato brasileiro ('1.000,00') para float."""
+    """Converts a Brazilian formatted currency string ('1.000,00') to float.
+
+    Args:
+        valor_str (str | None): Brazilian-formatted currency string.
+
+    Returns:
+        float: Parsed numeric value.
+    """
     if not valor_str:
         return 0.0
     try:
@@ -1704,7 +2147,17 @@ def parse_valor_projeto(valor_str: str | None) -> float:
 
 
 async def get_cargo_consultor_do_membro(membro_id: int) -> int:
-    """Retorna o cargo_id de consultor do membro (10 ou 11). Padrão: 10 (Consultor de Projetos)."""
+    """Retrieves the project consultant cargo ID (10 or 11) for a member.
+
+    Queries `membro_cargo` for cargo ID 10 (Consultor de Projetos) or 11.
+    Defaults to 10 if none is found.
+
+    Args:
+        membro_id (int): Database ID of the member.
+
+    Returns:
+        int: Cargo ID.
+    """
     result = await asyncio.to_thread(
         execute_query,
         'SELECT cargo_id FROM membro_cargo WHERE membro_id = %s AND cargo_id IN (10, 11) LIMIT 1',
@@ -1715,7 +2168,14 @@ async def get_cargo_consultor_do_membro(membro_id: int) -> int:
 
 
 async def get_coordenacao_do_membro(membro_id: int) -> int | None:
-    """Retorna a coordenacao_id principal do membro."""
+    """Retrieves the primary department coordination ID for a member.
+
+    Args:
+        membro_id (int): Database ID of the member.
+
+    Returns:
+        int | None: Department coordination ID, or None if not assigned.
+    """
     result = await asyncio.to_thread(
         execute_query,
         'SELECT coordenacao_id FROM membro_coordenacao WHERE membro_id = %s LIMIT 1',
@@ -1726,11 +2186,13 @@ async def get_coordenacao_do_membro(membro_id: int) -> int | None:
 
 
 async def get_cliente_placeholder() -> int:
-    """Cliente neutro para contratos criados pelo app sem cliente definido.
+    """Retrieves or creates a fallback client object when a project is created without one.
 
-    Antes era `SELECT id FROM cliente LIMIT 1`: um cliente real arbitrário (o
-    primeiro da tabela) virava dono de todos os contratos criados pelo form. O
-    sync do Pipefy troca pelo cliente verdadeiro quando o card chega.
+    Ensures that temporary projects or forms have a valid client reference.
+    When a contract is synced later from Pipefy, it gets swapped for the actual client.
+
+    Returns:
+        int: Database ID of the placeholder client.
     """
     row = await asyncio.to_thread(
         execute_query,
@@ -1746,12 +2208,27 @@ async def get_cliente_placeholder() -> int:
         ('Cliente não informado',),
     )
     if not novo:
-        raise Exception('Falha ao criar cliente placeholder')
+        raise Exception('Falha ao criar client placeholder')
     return novo
 
 
 @app.post('/api/projetos')
 async def create_projeto(data: ProjetoCreate, _auth: None = Depends(require_admin_token)):
+    """POST /api/projetos
+
+    Creates a new project record and links its relations.
+    Requires header admin token authentication.
+    Validates that the contract number is globally unique before saving.
+    Inserts a new `projeto_externo` record and then initiates relationship mappings
+    for contracts, services, consultores, and managers.
+
+    Args:
+        data (ProjetoCreate): The project creation request body.
+        _auth (None): Depends on require_admin_token dependency.
+
+    Returns:
+        dict: E.g. {'success': True, 'projeto_id': int}
+    """
     try:
         # Validar número de contrato antes de qualquer INSERT
         if data.numero_contrato and data.numero_contrato.strip():
@@ -1799,6 +2276,13 @@ async def create_projeto(data: ProjetoCreate, _auth: None = Depends(require_admi
 
 
 async def _create_projeto_relations(projeto_id: int, data: ProjetoCreate, data_inicio: str | None) -> None:
+    """Helper function to insert related contract, service, and member details for a new project.
+
+    Args:
+        projeto_id (int): Database ID of the newly created project.
+        data (ProjetoCreate): The project creation request payload.
+        data_inicio (str | None): Start date of the project.
+    """
     # 2. Criar contrato com cliente placeholder (o sync do Pipefy completa depois)
     cliente_id = await get_cliente_placeholder()
     numero = data.numero_contrato.strip() if data.numero_contrato else f'CONTRATO-TEMP-{projeto_id}'
