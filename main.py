@@ -151,7 +151,6 @@ async def get_projetos(gerente_id: int | None = None):
           AND mp.membro_id = %s
           AND mp.data_saida IS NULL
           AND LOWER(cg.nome) LIKE '%gerente%'
-          AND LOWER(cg.nome) LIKE '%projeto%'
       )
         '''
         params = (gerente_id,)
@@ -202,7 +201,6 @@ async def get_all_projetos():
             WHERE mp.projeto_externo_id = pe.id
               AND mp.data_saida IS NULL
               AND LOWER(cg.nome) LIKE '%gerente%'
-              AND LOWER(cg.nome) LIKE '%projeto%'
         ) as gerente
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
@@ -247,7 +245,6 @@ async def validate_project_manager(respondente_nome: str, projeto_externo_id: in
       AND m.nome = %s
       AND mp.data_saida IS NULL
       AND LOWER(c.nome) LIKE '%gerente%'
-      AND LOWER(c.nome) LIKE '%projeto%'
     LIMIT 1
     '''
     resultado = await asyncio.to_thread(
@@ -1588,10 +1585,10 @@ async def get_membros():
     query = '''
     SELECT DISTINCT m.id, m.nome, m.email
     FROM membro m
-    JOIN membro_cargo mc ON mc.membro_id = m.id
-    JOIN cargo c ON c.id = mc.cargo_id
-    WHERE LOWER(c.nome) LIKE '%gerente%'
-      AND LOWER(c.nome) LIKE '%projeto%'
+    JOIN membro_projeto mp ON mp.membro_id = m.id
+    JOIN cargo c ON c.id = mp.cargo_id
+    WHERE mp.data_saida IS NULL
+      AND LOWER(c.nome) LIKE '%gerente%'
     ORDER BY m.nome
     '''
     resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
@@ -1914,7 +1911,6 @@ async def get_dashboard_pape(
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
                   AND LOWER(cg.nome) LIKE '%gerente%'
-                  AND LOWER(cg.nome) LIKE '%projeto%'
             ), 'Sem gerente') as gerente,
             COALESCE((
                 SELECT GROUP_CONCAT(DISTINCT co.nome ORDER BY co.nome SEPARATOR ', ')
@@ -2002,7 +1998,6 @@ async def get_dashboard_pape(
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
                   AND LOWER(cg.nome) LIKE '%gerente%'
-                  AND LOWER(cg.nome) LIKE '%projeto%'
             ), 'Sem gerente') as gerente
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
@@ -2045,7 +2040,6 @@ async def get_dashboard_pape(
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
                   AND LOWER(cg.nome) LIKE '%gerente%'
-                  AND LOWER(cg.nome) LIKE '%projeto%'
             ), 'Sem gerente') as gerente
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
