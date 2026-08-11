@@ -161,12 +161,13 @@ async def get_projetos(gerente_id: int | None = None):
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
     WHERE (
-        c.id IS NULL
+        pe.status = 'ativo'
+        OR c.id IS NULL
         OR (
-        c.finalizado_em IS NULL
-        AND (c.fase_atual IS NULL OR c.fase_atual NOT IN ('Concluido', 'Cancelado'))
+            c.finalizado_em IS NULL
+            AND (c.fase_atual IS NULL OR c.fase_atual NOT IN ('Concluido', 'Cancelado'))
         )
-       )
+    )
     {manager_filter}
     ORDER BY pe.nome
     '''.format(manager_filter=manager_filter)
