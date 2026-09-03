@@ -1700,6 +1700,11 @@ def _submit_pape_tx(data: PapeFormData) -> int:
         row = cur.fetchone()
         contrato_id = row['contrato_id'] if row else None
 
+        modelo_db = {
+            'Ágil': 'Agil',
+            'Híbrido': 'Hibrido',
+        }.get(data.modelo_gerenciamento, data.modelo_gerenciamento)
+
         cur.execute(
             '''INSERT INTO acompanhamento_projeto (
                 projeto_externo_id, contrato_id, data_resposta, modelo_gerenciamento,
@@ -1711,7 +1716,7 @@ def _submit_pape_tx(data: PapeFormData) -> int:
                 satisfacao_cliente, suficiencia_orcamento_nota, dados_iniciais_adicionais
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
             (
-                data.projeto_externo_id, contrato_id, datetime.now().date(), data.modelo_gerenciamento,
+                data.projeto_externo_id, contrato_id, datetime.now().date(), modelo_db,
                 data.pct_conclusao, data.status_cronograma, motivos_str,
                 data.capacitacao_equipe, data.eficacia_metodologia, data.nivel_retrabalho,
                 data.comunicacao_cliente, orcamento_nao_necessario,
@@ -1727,7 +1732,7 @@ def _submit_pape_tx(data: PapeFormData) -> int:
                        efetividade_orientador, disponibilidade_orientador) VALUES (%s, 1, %s, %s, %s)''',
                 (acomp_id, data.nome_orientador or 'Sem nome', data.efetividade_orientador, data.disponibilidade_orientador),
             )
-        if data.modelo_gerenciamento == 'Ágil' and data.pct_story_points:
+        if data.modelo_gerenciamento in ('Ágil', 'Agil') and data.pct_story_points:
             cur.execute(
                 'INSERT INTO acomp_sprint (acompanhamento_id, pct_story_points) VALUES (%s, %s)',
                 (acomp_id, data.pct_story_points),

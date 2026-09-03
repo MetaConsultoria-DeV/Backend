@@ -35,11 +35,11 @@ class MembrosEndpointTest(unittest.IsolatedAsyncioTestCase):
 
         query = execute_query.call_args.args[0]
         self.assertIn('FROM membro m', query)
-        self.assertIn('JOIN membro_cargo mc ON mc.membro_id = m.id', query)
-        self.assertIn('JOIN cargo c ON c.id = mc.cargo_id', query)
+        self.assertIn('JOIN membro_projeto mp ON mp.membro_id = m.id', query)
+        self.assertIn('JOIN cargo c ON c.id = mp.cargo_id', query)
+        self.assertIn('mp.data_saida IS NULL', query)
         self.assertIn('LOWER(c.nome)', query)
         self.assertIn('%gerente%', query)
-        self.assertIn('%projeto%', query)
         self.assertEqual(response, expected_rows)
 
 
@@ -151,7 +151,6 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('mp.membro_id = %s', query)
         self.assertIn('mp.data_saida IS NULL', query)
         self.assertIn('%gerente%', query)
-        self.assertIn('%projeto%', query)
         self.assertEqual(params, (7,))
         self.assertEqual(response, expected_rows)
 
