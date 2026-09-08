@@ -24,6 +24,11 @@ load_dotenv(dotenv_path)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('pape')
 
+# Cargo "Gerente de Projeto" na tabela `cargo`. A tabela tem nove cargos com
+# "gerente" no nome (Comercial, Financeiro, de Marca, SETTA...), por isso o id
+# é explícito em vez de um LIKE '%gerente%', que casava com todos eles.
+CARGO_GERENTE_PROJETO = 31
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -146,11 +151,10 @@ async def get_projetos(gerente_id: int | None = None):
       AND EXISTS (
         SELECT 1
         FROM membro_projeto mp
-        JOIN cargo cg ON cg.id = mp.cargo_id
         WHERE mp.projeto_externo_id = pe.id
           AND mp.membro_id = %s
           AND mp.data_saida IS NULL
-          AND LOWER(cg.nome) LIKE '%gerente%'
+          AND mp.cargo_id = 31
       )
         '''
         params = (gerente_id,)
@@ -198,10 +202,9 @@ async def get_all_projetos():
             SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
             FROM membro_projeto mp
             JOIN membro m ON m.id = mp.membro_id
-            JOIN cargo cg ON cg.id = mp.cargo_id
             WHERE mp.projeto_externo_id = pe.id
               AND mp.data_saida IS NULL
-              AND LOWER(cg.nome) LIKE '%gerente%'
+              AND mp.cargo_id = 31
         ) as gerente
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
@@ -241,11 +244,10 @@ async def validate_project_manager(respondente_nome: str, projeto_externo_id: in
     SELECT mp.id
     FROM membro_projeto mp
     JOIN membro m ON m.id = mp.membro_id
-    JOIN cargo c ON c.id = mp.cargo_id
     WHERE mp.projeto_externo_id = %s
       AND m.nome = %s
       AND mp.data_saida IS NULL
-      AND LOWER(c.nome) LIKE '%gerente%'
+      AND mp.cargo_id = 31
     LIMIT 1
     '''
     resultado = await asyncio.to_thread(
@@ -1587,9 +1589,8 @@ async def get_membros():
     SELECT DISTINCT m.id, m.nome, m.email
     FROM membro m
     JOIN membro_projeto mp ON mp.membro_id = m.id
-    JOIN cargo c ON c.id = mp.cargo_id
     WHERE mp.data_saida IS NULL
-      AND LOWER(c.nome) LIKE '%gerente%'
+      AND mp.cargo_id = 31
     ORDER BY m.nome
     '''
     resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
@@ -1913,10 +1914,9 @@ async def get_dashboard_pape(
                 SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
                 FROM membro_projeto mp
                 JOIN membro m ON m.id = mp.membro_id
-                JOIN cargo cg ON cg.id = mp.cargo_id
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
-                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND mp.cargo_id = 31
             ), 'Sem gerente') as gerente,
             COALESCE((
                 SELECT GROUP_CONCAT(DISTINCT co.nome ORDER BY co.nome SEPARATOR ', ')
@@ -2000,10 +2000,9 @@ async def get_dashboard_pape(
                 SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
                 FROM membro_projeto mp
                 JOIN membro m ON m.id = mp.membro_id
-                JOIN cargo cg ON cg.id = mp.cargo_id
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
-                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND mp.cargo_id = 31
             ), 'Sem gerente') as gerente
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
@@ -2042,10 +2041,9 @@ async def get_dashboard_pape(
                 SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
                 FROM membro_projeto mp
                 JOIN membro m ON m.id = mp.membro_id
-                JOIN cargo cg ON cg.id = mp.cargo_id
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
-                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND mp.cargo_id = 31
             ), 'Sem gerente') as gerente
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id

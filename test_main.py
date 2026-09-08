@@ -36,10 +36,9 @@ class MembrosEndpointTest(unittest.IsolatedAsyncioTestCase):
         query = execute_query.call_args.args[0]
         self.assertIn('FROM membro m', query)
         self.assertIn('JOIN membro_projeto mp ON mp.membro_id = m.id', query)
-        self.assertIn('JOIN cargo c ON c.id = mp.cargo_id', query)
         self.assertIn('mp.data_saida IS NULL', query)
-        self.assertIn('LOWER(c.nome)', query)
-        self.assertIn('%gerente%', query)
+        self.assertIn('mp.cargo_id = 31', query)
+        self.assertNotIn('%gerente%', query)
         self.assertEqual(response, expected_rows)
 
 
@@ -147,10 +146,10 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
         query, params = execute_query.call_args.args[:2]
         self.assertIn('EXISTS', query)
         self.assertIn('FROM membro_projeto mp', query)
-        self.assertIn('JOIN cargo cg ON cg.id = mp.cargo_id', query)
         self.assertIn('mp.membro_id = %s', query)
         self.assertIn('mp.data_saida IS NULL', query)
-        self.assertIn('%gerente%', query)
+        self.assertIn('mp.cargo_id = 31', query)
+        self.assertNotIn('%gerente%', query)
         self.assertEqual(params, (7,))
         self.assertEqual(response, expected_rows)
 
@@ -224,10 +223,10 @@ class SubmitPapeValidationTest(unittest.IsolatedAsyncioTestCase):
         query, params = execute_query.call_args.args[:2]
         self.assertIn('FROM membro_projeto mp', query)
         self.assertIn('JOIN membro m ON m.id = mp.membro_id', query)
-        self.assertIn('JOIN cargo c ON c.id = mp.cargo_id', query)
         self.assertIn('mp.projeto_externo_id = %s', query)
         self.assertIn('m.nome = %s', query)
         self.assertIn('mp.data_saida IS NULL', query)
+        self.assertIn('mp.cargo_id = 31', query)
         self.assertEqual(params, (3, 'Ana Silva'))
         self.assertTrue(is_valid)
 
