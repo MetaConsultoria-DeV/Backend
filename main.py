@@ -1382,22 +1382,9 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
                 )
             
             if novo_gerente_nome:
-                novo_gerente = await asyncio.to_thread(
-                    execute_query,
-                    'SELECT id FROM membro WHERE nome = %s LIMIT 1',
-                    (novo_gerente_nome,),
-                    fetch_one=True,
+                await vincular_gerente_projeto(
+                    projeto_id, novo_gerente_nome, datetime.now().date()
                 )
-                if novo_gerente:
-                    n_id = novo_gerente['id']
-                    coordenacao_id = await get_coordenacao_do_membro(n_id)
-                    if coordenacao_id:
-                        await asyncio.to_thread(
-                            execute_query,
-                            '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
-                               VALUES (%s, %s, %s, 31, CURRENT_DATE())''',
-                            (n_id, projeto_id, coordenacao_id)
-                        )
 
     return {'success': True, 'message': 'Projeto atualizado com sucesso'}
 
@@ -2230,6 +2217,51 @@ async def get_coordenacao_do_membro(membro_id: int) -> int | None:
     return result['coordenacao_id'] if result else None
 
 
+async def vincular_gerente_projeto(projeto_id: int, nome_gerente: str, data_entrada) -> int:
+    """Cria o vínculo de gerência de um projeto.
+
+    A coordenação é gravada como NULL de propósito: coordenação descreve por
+    qual área um consultor atua num projeto, e gerência é um cargo à parte —
+    a mesma pessoa pode gerenciar um projeto de CE e atuar como consultora de
+    OP em outro.
+
+    Antes esta gravação dependia de get_coordenacao_do_membro e pulava o INSERT
+    quando a pessoa não tinha coordenação cadastrada, gravando nada e
+    devolvendo sucesso.
+
+    Args:
+        projeto_id (int): ID do projeto.
+        nome_gerente (str): Nome do membro, como consta em `membro.nome`.
+        data_entrada: Data de início do vínculo.
+
+    Returns:
+        int: ID do membro vinculado.
+
+    Raises:
+        HTTPException: 400 quando o nome não existe em `membro`.
+    """
+    gerente = await asyncio.to_thread(
+        execute_query,
+        'SELECT id FROM membro WHERE nome = %s LIMIT 1',
+        (nome_gerente,),
+        fetch_one=True,
+    )
+    if not gerente:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Membro não encontrado para o nome informado: {nome_gerente}',
+        )
+
+    await asyncio.to_thread(
+        execute_query,
+        '''INSERT INTO membro_projeto
+             (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
+           VALUES (%s, %s, %s, %s, %s)''',
+        (gerente['id'], projeto_id, None, CARGO_GERENTE_PROJETO, data_entrada),
+    )
+    return gerente['id']
+
+
 async def get_cliente_placeholder() -> int:
     """Retrieves or creates a fallback client object when a project is created without one.
 
@@ -2369,23 +2401,9 @@ async def _create_projeto_relations(projeto_id: int, data: ProjetoCreate, data_i
             (membro_id, projeto_id, coordenacao_id, cargo_id, data_inicio),
         )
 
-    # 5. Vincular gerente — cargo_id 31 (Gerente de Projeto)
+    # 5. Vincular gerente — coordenação fica NULL, gerência é cargo à parte
     if data.gerente_projeto:
-        gerente = await asyncio.to_thread(
-            execute_query,
-            'SELECT id FROM membro WHERE nome = %s LIMIT 1',
-            (data.gerente_projeto,),
-            fetch_one=True,
-        )
-        if gerente:
-            coordenacao_id = await get_coordenacao_do_membro(gerente['id'])
-            if coordenacao_id:
-                await asyncio.to_thread(
-                    execute_query,
-                    '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
-                       VALUES (%s, %s, %s, %s, %s)''',
-                    (gerente['id'], projeto_id, coordenacao_id, 31, data_inicio),
-                )
+        await vincular_gerente_projeto(projeto_id, data.gerente_projeto, data_inicio)
 
 
 if __name__ == '__main__':

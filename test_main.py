@@ -93,6 +93,53 @@ class GerentesEndpointTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.main.get_membros(), rows)
 
 
+class VincularGerenteTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    @staticmethod
+    async def _run_sync(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def test_grava_gerente_sem_coordenacao(self):
+        """Regressao do bug original: quem nao tinha coordenacao cadastrada
+        tinha o INSERT pulado, e a API respondia sucesso sem gravar nada."""
+        chamadas = []
+
+        def fake_execute_query(query, params=None, **kwargs):
+            chamadas.append((query, params))
+            if 'FROM membro WHERE nome' in query:
+                return {'id': 62}
+            return None
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=fake_execute_query),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            membro_id = await self.main.vincular_gerente_projeto(
+                164, 'Naylan Cardoso Nogueira', '2026-08-01'
+            )
+
+        self.assertEqual(membro_id, 62)
+        inserts = [c for c in chamadas if 'INSERT INTO membro_projeto' in c[0]]
+        self.assertEqual(len(inserts), 1, 'o vinculo do gerente precisa ser gravado')
+        self.assertIn(None, inserts[0][1], 'coordenacao_id deve ir NULL')
+
+    async def test_nome_inexistente_devolve_400(self):
+        def fake_execute_query(query, params=None, **kwargs):
+            return None
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=fake_execute_query),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            with self.assertRaises(self.main.HTTPException) as ctx:
+                await self.main.vincular_gerente_projeto(164, 'Fulano Inexistente', None)
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn('Fulano Inexistente', str(ctx.exception.detail))
+
+
 class MembrosPorCoordenacaoEndpointTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.main = import_main_without_database()
