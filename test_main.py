@@ -42,6 +42,57 @@ class MembrosEndpointTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response, expected_rows)
 
 
+class GerentesEndpointTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    @staticmethod
+    async def _run_sync(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def test_ativos_exige_vinculo_de_gerencia_em_aberto(self):
+        rows = [{'id': 1, 'nome': 'Ana Silva', 'email': 'ana@example.com'}]
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=rows) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            response = await self.main.get_gerentes_ativos()
+
+        query = execute_query.call_args.args[0]
+        self.assertIn('membro_projeto', query)
+        self.assertIn('mp.data_saida IS NULL', query)
+        self.assertIn('mp.cargo_id = 31', query)
+        self.assertEqual(response, rows)
+
+    async def test_elegiveis_inclui_quem_tem_cargo_e_nenhum_projeto(self):
+        rows = [{'id': 7, 'nome': 'Nova Gerente', 'email': 'nova@example.com'}]
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=rows) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            response = await self.main.get_gerentes_elegiveis()
+
+        query = execute_query.call_args.args[0]
+        self.assertIn('membro_cargo', query)
+        self.assertIn('UNION', query.upper())
+        self.assertIn('membro_projeto', query)
+        # Elegibilidade nao depende de vinculo ativo: quem ja gerenciou continua
+        # na lista mesmo com o vinculo encerrado.
+        self.assertNotIn('data_saida IS NULL', query)
+        self.assertEqual(response, rows)
+
+    async def test_membros_continua_respondendo_como_ativos(self):
+        rows = [{'id': 1, 'nome': 'Ana Silva', 'email': 'ana@example.com'}]
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=rows),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            self.assertEqual(await self.main.get_membros(), rows)
+
+
 class MembrosPorCoordenacaoEndpointTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.main = import_main_without_database()

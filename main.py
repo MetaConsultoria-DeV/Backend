@@ -1573,14 +1573,15 @@ async def get_servicos():
 
 
 
-@app.get('/api/membros', response_model=list[Membro])
-async def get_membros():
-    """GET /api/membros
+@app.get('/api/gerentes/ativos', response_model=list[Membro])
+async def get_gerentes_ativos():
+    """GET /api/gerentes/ativos
 
-    Retrieves a list of active team members who hold project manager roles.
+    Gerentes que estão gerenciando algum projeto no momento. Alimenta o
+    formulário PAPE, onde a gerente se identifica para carregar seus projetos.
 
     Returns:
-        list[dict]: List of project managers:
+        list[dict]: List of active project managers:
             - id (int): Member ID.
             - nome (str): Manager name.
             - email (str): Manager email.
@@ -1595,6 +1596,52 @@ async def get_membros():
     '''
     resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
     return resultado or []
+
+
+@app.get('/api/gerentes/elegiveis', response_model=list[Membro])
+async def get_gerentes_elegiveis():
+    """GET /api/gerentes/elegiveis
+
+    Quem pode ser escolhido como gerente ao criar ou editar um projeto: quem
+    tem o cargo institucional de Gerente de Projeto em `membro_cargo`, mais
+    quem já gerenciou algum projeto — inclusive com o vínculo encerrado.
+
+    Não depende de vínculo ativo. É isso que permite atribuir um projeto a uma
+    gerente recém-promovida, que antes não aparecia em lugar nenhum: para
+    entrar na lista era preciso já ter projeto, e para ter projeto era preciso
+    estar na lista.
+
+    Returns:
+        list[dict]: List of eligible project managers:
+            - id (int): Member ID.
+            - nome (str): Manager name.
+            - email (str): Manager email.
+    """
+    query = '''
+    SELECT m.id, m.nome, m.email
+    FROM membro m
+    WHERE m.id IN (
+        SELECT mc.membro_id FROM membro_cargo mc WHERE mc.cargo_id = 31
+        UNION
+        SELECT mp.membro_id FROM membro_projeto mp WHERE mp.cargo_id = 31
+    )
+    ORDER BY m.nome
+    '''
+    resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+    return resultado or []
+
+
+@app.get('/api/membros', response_model=list[Membro])
+async def get_membros():
+    """GET /api/membros
+
+    DEPRECATED: mantido para não quebrar integrações externas (n8n). É apenas
+    um apelido de /api/gerentes/ativos.
+
+    Returns:
+        list[dict]: Mesmo retorno de get_gerentes_ativos.
+    """
+    return await get_gerentes_ativos()
 
 
 @app.get('/api/membros-por-coordenacao', response_model=list[MembrosPorCoordenacao])
