@@ -24,6 +24,11 @@ load_dotenv(dotenv_path)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('pape')
 
+# Cargo "Gerente de Projeto" na tabela `cargo`. A tabela tem nove cargos com
+# "gerente" no nome (Comercial, Financeiro, de Marca, SETTA...), por isso o id
+# é explícito em vez de um LIKE '%gerente%', que casava com todos eles.
+CARGO_GERENTE_PROJETO = 31
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -146,11 +151,10 @@ async def get_projetos(gerente_id: int | None = None):
       AND EXISTS (
         SELECT 1
         FROM membro_projeto mp
-        JOIN cargo cg ON cg.id = mp.cargo_id
         WHERE mp.projeto_externo_id = pe.id
           AND mp.membro_id = %s
           AND mp.data_saida IS NULL
-          AND LOWER(cg.nome) LIKE '%gerente%'
+          AND mp.cargo_id = 31
       )
         '''
         params = (gerente_id,)
@@ -198,10 +202,9 @@ async def get_all_projetos():
             SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
             FROM membro_projeto mp
             JOIN membro m ON m.id = mp.membro_id
-            JOIN cargo cg ON cg.id = mp.cargo_id
             WHERE mp.projeto_externo_id = pe.id
               AND mp.data_saida IS NULL
-              AND LOWER(cg.nome) LIKE '%gerente%'
+              AND mp.cargo_id = 31
         ) as gerente
     FROM projeto_externo pe
     LEFT JOIN contrato c ON c.projeto_externo_id = pe.id
@@ -241,11 +244,10 @@ async def validate_project_manager(respondente_nome: str, projeto_externo_id: in
     SELECT mp.id
     FROM membro_projeto mp
     JOIN membro m ON m.id = mp.membro_id
-    JOIN cargo c ON c.id = mp.cargo_id
     WHERE mp.projeto_externo_id = %s
       AND m.nome = %s
       AND mp.data_saida IS NULL
-      AND LOWER(c.nome) LIKE '%gerente%'
+      AND mp.cargo_id = 31
     LIMIT 1
     '''
     resultado = await asyncio.to_thread(
@@ -1380,22 +1382,9 @@ async def update_projeto(projeto_id: int, data: ProjetoUpdate, _auth: None = Dep
                 )
             
             if novo_gerente_nome:
-                novo_gerente = await asyncio.to_thread(
-                    execute_query,
-                    'SELECT id FROM membro WHERE nome = %s LIMIT 1',
-                    (novo_gerente_nome,),
-                    fetch_one=True,
+                await vincular_gerente_projeto(
+                    projeto_id, novo_gerente_nome, datetime.now().date()
                 )
-                if novo_gerente:
-                    n_id = novo_gerente['id']
-                    coordenacao_id = await get_coordenacao_do_membro(n_id)
-                    if coordenacao_id:
-                        await asyncio.to_thread(
-                            execute_query,
-                            '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
-                               VALUES (%s, %s, %s, 31, CURRENT_DATE())''',
-                            (n_id, projeto_id, coordenacao_id)
-                        )
 
     return {'success': True, 'message': 'Projeto atualizado com sucesso'}
 
@@ -1571,14 +1560,15 @@ async def get_servicos():
 
 
 
-@app.get('/api/membros', response_model=list[Membro])
-async def get_membros():
-    """GET /api/membros
+@app.get('/api/gerentes/ativos', response_model=list[Membro])
+async def get_gerentes_ativos():
+    """GET /api/gerentes/ativos
 
-    Retrieves a list of active team members who hold project manager roles.
+    Gerentes que estão gerenciando algum projeto no momento. Alimenta o
+    formulário PAPE, onde a gerente se identifica para carregar seus projetos.
 
     Returns:
-        list[dict]: List of project managers:
+        list[dict]: List of active project managers:
             - id (int): Member ID.
             - nome (str): Manager name.
             - email (str): Manager email.
@@ -1587,13 +1577,58 @@ async def get_membros():
     SELECT DISTINCT m.id, m.nome, m.email
     FROM membro m
     JOIN membro_projeto mp ON mp.membro_id = m.id
-    JOIN cargo c ON c.id = mp.cargo_id
     WHERE mp.data_saida IS NULL
-      AND LOWER(c.nome) LIKE '%gerente%'
+      AND mp.cargo_id = 31
     ORDER BY m.nome
     '''
     resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
     return resultado or []
+
+
+@app.get('/api/gerentes/elegiveis', response_model=list[Membro])
+async def get_gerentes_elegiveis():
+    """GET /api/gerentes/elegiveis
+
+    Quem pode ser escolhido como gerente ao criar ou editar um projeto: quem
+    tem o cargo institucional de Gerente de Projeto em `membro_cargo`, mais
+    quem já gerenciou algum projeto — inclusive com o vínculo encerrado.
+
+    Não depende de vínculo ativo. É isso que permite atribuir um projeto a uma
+    gerente recém-promovida, que antes não aparecia em lugar nenhum: para
+    entrar na lista era preciso já ter projeto, e para ter projeto era preciso
+    estar na lista.
+
+    Returns:
+        list[dict]: List of eligible project managers:
+            - id (int): Member ID.
+            - nome (str): Manager name.
+            - email (str): Manager email.
+    """
+    query = '''
+    SELECT m.id, m.nome, m.email
+    FROM membro m
+    WHERE m.id IN (
+        SELECT mc.membro_id FROM membro_cargo mc WHERE mc.cargo_id = 31
+        UNION
+        SELECT mp.membro_id FROM membro_projeto mp WHERE mp.cargo_id = 31
+    )
+    ORDER BY m.nome
+    '''
+    resultado = await asyncio.to_thread(execute_query, query, fetch_all=True)
+    return resultado or []
+
+
+@app.get('/api/membros', response_model=list[Membro])
+async def get_membros():
+    """GET /api/membros
+
+    DEPRECATED: mantido para não quebrar integrações externas (n8n). É apenas
+    um apelido de /api/gerentes/ativos.
+
+    Returns:
+        list[dict]: Mesmo retorno de get_gerentes_ativos.
+    """
+    return await get_gerentes_ativos()
 
 
 @app.get('/api/membros-por-coordenacao', response_model=list[MembrosPorCoordenacao])
@@ -1913,10 +1948,9 @@ async def get_dashboard_pape(
                 SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
                 FROM membro_projeto mp
                 JOIN membro m ON m.id = mp.membro_id
-                JOIN cargo cg ON cg.id = mp.cargo_id
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
-                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND mp.cargo_id = 31
             ), 'Sem gerente') as gerente,
             COALESCE((
                 SELECT GROUP_CONCAT(DISTINCT co.nome ORDER BY co.nome SEPARATOR ', ')
@@ -2000,10 +2034,9 @@ async def get_dashboard_pape(
                 SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
                 FROM membro_projeto mp
                 JOIN membro m ON m.id = mp.membro_id
-                JOIN cargo cg ON cg.id = mp.cargo_id
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
-                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND mp.cargo_id = 31
             ), 'Sem gerente') as gerente
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
@@ -2042,10 +2075,9 @@ async def get_dashboard_pape(
                 SELECT GROUP_CONCAT(DISTINCT m.nome ORDER BY m.nome SEPARATOR ', ')
                 FROM membro_projeto mp
                 JOIN membro m ON m.id = mp.membro_id
-                JOIN cargo cg ON cg.id = mp.cargo_id
                 WHERE mp.projeto_externo_id = pe.id
                   AND mp.data_saida IS NULL
-                  AND LOWER(cg.nome) LIKE '%gerente%'
+                  AND mp.cargo_id = 31
             ), 'Sem gerente') as gerente
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
@@ -2183,6 +2215,51 @@ async def get_coordenacao_do_membro(membro_id: int) -> int | None:
         fetch_one=True,
     )
     return result['coordenacao_id'] if result else None
+
+
+async def vincular_gerente_projeto(projeto_id: int, nome_gerente: str, data_entrada) -> int:
+    """Cria o vínculo de gerência de um projeto.
+
+    A coordenação é gravada como NULL de propósito: coordenação descreve por
+    qual área um consultor atua num projeto, e gerência é um cargo à parte —
+    a mesma pessoa pode gerenciar um projeto de CE e atuar como consultora de
+    OP em outro.
+
+    Antes esta gravação dependia de get_coordenacao_do_membro e pulava o INSERT
+    quando a pessoa não tinha coordenação cadastrada, gravando nada e
+    devolvendo sucesso.
+
+    Args:
+        projeto_id (int): ID do projeto.
+        nome_gerente (str): Nome do membro, como consta em `membro.nome`.
+        data_entrada: Data de início do vínculo.
+
+    Returns:
+        int: ID do membro vinculado.
+
+    Raises:
+        HTTPException: 400 quando o nome não existe em `membro`.
+    """
+    gerente = await asyncio.to_thread(
+        execute_query,
+        'SELECT id FROM membro WHERE nome = %s LIMIT 1',
+        (nome_gerente,),
+        fetch_one=True,
+    )
+    if not gerente:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Membro não encontrado para o nome informado: {nome_gerente}',
+        )
+
+    await asyncio.to_thread(
+        execute_query,
+        '''INSERT INTO membro_projeto
+             (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
+           VALUES (%s, %s, %s, %s, %s)''',
+        (gerente['id'], projeto_id, None, CARGO_GERENTE_PROJETO, data_entrada),
+    )
+    return gerente['id']
 
 
 async def get_cliente_placeholder() -> int:
@@ -2324,23 +2401,9 @@ async def _create_projeto_relations(projeto_id: int, data: ProjetoCreate, data_i
             (membro_id, projeto_id, coordenacao_id, cargo_id, data_inicio),
         )
 
-    # 5. Vincular gerente — cargo_id 31 (Gerente de Projeto)
+    # 5. Vincular gerente — coordenação fica NULL, gerência é cargo à parte
     if data.gerente_projeto:
-        gerente = await asyncio.to_thread(
-            execute_query,
-            'SELECT id FROM membro WHERE nome = %s LIMIT 1',
-            (data.gerente_projeto,),
-            fetch_one=True,
-        )
-        if gerente:
-            coordenacao_id = await get_coordenacao_do_membro(gerente['id'])
-            if coordenacao_id:
-                await asyncio.to_thread(
-                    execute_query,
-                    '''INSERT INTO membro_projeto (membro_id, projeto_externo_id, coordenacao_id, cargo_id, data_entrada)
-                       VALUES (%s, %s, %s, %s, %s)''',
-                    (gerente['id'], projeto_id, coordenacao_id, 31, data_inicio),
-                )
+        await vincular_gerente_projeto(projeto_id, data.gerente_projeto, data_inicio)
 
 
 if __name__ == '__main__':

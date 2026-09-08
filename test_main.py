@@ -36,11 +36,108 @@ class MembrosEndpointTest(unittest.IsolatedAsyncioTestCase):
         query = execute_query.call_args.args[0]
         self.assertIn('FROM membro m', query)
         self.assertIn('JOIN membro_projeto mp ON mp.membro_id = m.id', query)
-        self.assertIn('JOIN cargo c ON c.id = mp.cargo_id', query)
         self.assertIn('mp.data_saida IS NULL', query)
-        self.assertIn('LOWER(c.nome)', query)
-        self.assertIn('%gerente%', query)
+        self.assertIn('mp.cargo_id = 31', query)
+        self.assertNotIn('%gerente%', query)
         self.assertEqual(response, expected_rows)
+
+
+class GerentesEndpointTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    @staticmethod
+    async def _run_sync(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def test_ativos_exige_vinculo_de_gerencia_em_aberto(self):
+        rows = [{'id': 1, 'nome': 'Ana Silva', 'email': 'ana@example.com'}]
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=rows) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            response = await self.main.get_gerentes_ativos()
+
+        query = execute_query.call_args.args[0]
+        self.assertIn('membro_projeto', query)
+        self.assertIn('mp.data_saida IS NULL', query)
+        self.assertIn('mp.cargo_id = 31', query)
+        self.assertEqual(response, rows)
+
+    async def test_elegiveis_inclui_quem_tem_cargo_e_nenhum_projeto(self):
+        rows = [{'id': 7, 'nome': 'Nova Gerente', 'email': 'nova@example.com'}]
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=rows) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            response = await self.main.get_gerentes_elegiveis()
+
+        query = execute_query.call_args.args[0]
+        self.assertIn('membro_cargo', query)
+        self.assertIn('UNION', query.upper())
+        self.assertIn('membro_projeto', query)
+        # Elegibilidade nao depende de vinculo ativo: quem ja gerenciou continua
+        # na lista mesmo com o vinculo encerrado.
+        self.assertNotIn('data_saida IS NULL', query)
+        self.assertEqual(response, rows)
+
+    async def test_membros_continua_respondendo_como_ativos(self):
+        rows = [{'id': 1, 'nome': 'Ana Silva', 'email': 'ana@example.com'}]
+
+        with (
+            patch.object(self.main, 'execute_query', return_value=rows),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            self.assertEqual(await self.main.get_membros(), rows)
+
+
+class VincularGerenteTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.main = import_main_without_database()
+
+    @staticmethod
+    async def _run_sync(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def test_grava_gerente_sem_coordenacao(self):
+        """Regressao do bug original: quem nao tinha coordenacao cadastrada
+        tinha o INSERT pulado, e a API respondia sucesso sem gravar nada."""
+        chamadas = []
+
+        def fake_execute_query(query, params=None, **kwargs):
+            chamadas.append((query, params))
+            if 'FROM membro WHERE nome' in query:
+                return {'id': 62}
+            return None
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=fake_execute_query),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            membro_id = await self.main.vincular_gerente_projeto(
+                164, 'Naylan Cardoso Nogueira', '2026-08-01'
+            )
+
+        self.assertEqual(membro_id, 62)
+        inserts = [c for c in chamadas if 'INSERT INTO membro_projeto' in c[0]]
+        self.assertEqual(len(inserts), 1, 'o vinculo do gerente precisa ser gravado')
+        self.assertIn(None, inserts[0][1], 'coordenacao_id deve ir NULL')
+
+    async def test_nome_inexistente_devolve_400(self):
+        def fake_execute_query(query, params=None, **kwargs):
+            return None
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=fake_execute_query),
+            patch.object(self.main.asyncio, 'to_thread', side_effect=self._run_sync),
+        ):
+            with self.assertRaises(self.main.HTTPException) as ctx:
+                await self.main.vincular_gerente_projeto(164, 'Fulano Inexistente', None)
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn('Fulano Inexistente', str(ctx.exception.detail))
 
 
 class MembrosPorCoordenacaoEndpointTest(unittest.IsolatedAsyncioTestCase):
@@ -147,10 +244,10 @@ class ProjetosEndpointTest(unittest.IsolatedAsyncioTestCase):
         query, params = execute_query.call_args.args[:2]
         self.assertIn('EXISTS', query)
         self.assertIn('FROM membro_projeto mp', query)
-        self.assertIn('JOIN cargo cg ON cg.id = mp.cargo_id', query)
         self.assertIn('mp.membro_id = %s', query)
         self.assertIn('mp.data_saida IS NULL', query)
-        self.assertIn('%gerente%', query)
+        self.assertIn('mp.cargo_id = 31', query)
+        self.assertNotIn('%gerente%', query)
         self.assertEqual(params, (7,))
         self.assertEqual(response, expected_rows)
 
@@ -224,10 +321,10 @@ class SubmitPapeValidationTest(unittest.IsolatedAsyncioTestCase):
         query, params = execute_query.call_args.args[:2]
         self.assertIn('FROM membro_projeto mp', query)
         self.assertIn('JOIN membro m ON m.id = mp.membro_id', query)
-        self.assertIn('JOIN cargo c ON c.id = mp.cargo_id', query)
         self.assertIn('mp.projeto_externo_id = %s', query)
         self.assertIn('m.nome = %s', query)
         self.assertIn('mp.data_saida IS NULL', query)
+        self.assertIn('mp.cargo_id = 31', query)
         self.assertEqual(params, (3, 'Ana Silva'))
         self.assertTrue(is_valid)
 
