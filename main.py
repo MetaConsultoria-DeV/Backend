@@ -1883,6 +1883,14 @@ async def get_dashboard_pape(
             outer_date_filters += " AND ap.data_resposta <= %s"
             outer_params.append(data_fim)
 
+        # Dashboards consideram apenas projetos ativos: pausados e finalizados
+        # ficam fora de todos os blocos, inclusive contagens e datas.
+        projeto_ativo_filter = (
+            " AND ap.projeto_externo_id IN ("
+            "SELECT pe_ativo.id FROM projeto_externo pe_ativo WHERE pe_ativo.status = 'ativo')"
+        )
+        outer_filters = projeto_ativo_filter + outer_date_filters
+
         latest_filter = f'''
         NOT EXISTS (
             SELECT 1
@@ -1896,34 +1904,34 @@ async def get_dashboard_pape(
         )
         '''
 
-        total_respostas_query = f'SELECT COUNT(*) as total FROM acompanhamento_projeto ap WHERE 1=1 {outer_date_filters}'
+        total_respostas_query = f'SELECT COUNT(*) as total FROM acompanhamento_projeto ap WHERE 1=1 {outer_filters}'
         total_projetos_query = f'''
         SELECT COUNT(*) as total
         FROM acompanhamento_projeto ap
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
         '''
         sat_query = f'''
         SELECT AVG(ap.satisfacao_cliente) as media
         FROM acompanhamento_projeto ap
         WHERE ap.satisfacao_cliente IS NOT NULL
-          AND {latest_filter} {outer_date_filters}
+          AND {latest_filter} {outer_filters}
         '''
         met_query = f'''
         SELECT ap.modelo_gerenciamento, COUNT(*) as quantidade
         FROM acompanhamento_projeto ap
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
         GROUP BY ap.modelo_gerenciamento
         '''
         cron_query = f'''
         SELECT ap.status_cronograma, COUNT(*) as quantidade
         FROM acompanhamento_projeto ap
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
         GROUP BY ap.status_cronograma
         '''
         conclusao_query = f'''
         SELECT ap.pct_conclusao, COUNT(*) as quantidade
         FROM acompanhamento_projeto ap
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
         GROUP BY ap.pct_conclusao
         ORDER BY FIELD(ap.pct_conclusao, '0-20%', '21-40%', '41-60%', '61-80%', '81-100%')
         '''
@@ -1932,7 +1940,7 @@ async def get_dashboard_pape(
         FROM acompanhamento_projeto ap
         WHERE {latest_filter}
           AND ap.status_cronograma IN ('Com risco de atraso', 'Atrasado')
-          AND ap.motivos_atraso IS NOT NULL {outer_date_filters}
+          AND ap.motivos_atraso IS NOT NULL {outer_filters}
         '''
         projetos_query = f'''
         SELECT
@@ -1961,7 +1969,7 @@ async def get_dashboard_pape(
             ), 'Sem coordenação') as coordenacao
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
         ORDER BY
             FIELD(ap.status_cronograma, 'Atrasado', 'Com risco de atraso', 'Dentro do prazo', 'Concluido'),
             ap.data_resposta DESC,
@@ -1985,7 +1993,7 @@ async def get_dashboard_pape(
             ), 'Sem coordenação') as coordenacao
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
         ORDER BY
             FIELD(ap.status_cronograma, 'Atrasado', 'Com risco de atraso', 'Dentro do prazo', 'Concluido'),
             pe.nome
@@ -2000,7 +2008,7 @@ async def get_dashboard_pape(
             ap.eficacia_metodologia
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
         ORDER BY pe.nome
         '''
         cliente_orientacao_query = f'''
@@ -2018,7 +2026,7 @@ async def get_dashboard_pape(
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
         LEFT JOIN acomp_orientador ao ON ao.acompanhamento_id = ap.id
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
         ORDER BY pe.nome
         '''
         agil_query = f'''
@@ -2046,7 +2054,7 @@ async def get_dashboard_pape(
             FROM acomp_impedimento
             GROUP BY acompanhamento_id
         ) imp ON imp.acompanhamento_id = ap.id
-        WHERE {latest_filter} {outer_date_filters}
+        WHERE {latest_filter} {outer_filters}
           AND (
             ap.modelo_gerenciamento IN ('Ágil', 'Agil')
             OR acs.pct_story_points IS NOT NULL
@@ -2081,7 +2089,7 @@ async def get_dashboard_pape(
             ), 'Sem gerente') as gerente
         FROM acompanhamento_projeto ap
         JOIN projeto_externo pe ON pe.id = ap.projeto_externo_id
-        WHERE 1=1 {outer_date_filters}
+        WHERE 1=1 {outer_filters}
         ORDER BY pe.nome, ap.data_resposta, ap.id
         '''
 
@@ -2124,7 +2132,12 @@ async def get_dashboard_pape(
         detalhe_rows = await asyncio.to_thread(
             execute_query, detalhe_query, tuple(outer_params) if outer_params else None, fetch_all=True
         )
-        datas_disponiveis_query = 'SELECT DISTINCT data_resposta FROM acompanhamento_projeto ORDER BY data_resposta DESC'
+        datas_disponiveis_query = f'''
+        SELECT DISTINCT ap.data_resposta
+        FROM acompanhamento_projeto ap
+        WHERE 1=1 {projeto_ativo_filter}
+        ORDER BY ap.data_resposta DESC
+        '''
         datas_disponiveis_result = await asyncio.to_thread(
             execute_query, datas_disponiveis_query, fetch_all=True
         )
