@@ -607,6 +607,29 @@ class DashboardPapeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['motivos_atraso'][0], {'name': 'Comunicação com cliente', 'value': 2})
         self.assertEqual(len(result['historico']), 2)
 
+    async def test_get_dashboard_pape_considera_apenas_projetos_ativos(self):
+        """Pausados e finalizados nao entram em nenhum bloco do dashboard,
+        inclusive nas contagens totais e na lista de datas disponiveis."""
+
+        def fake_execute_query(query, params=None, fetch_one=False, fetch_all=False):
+            if fetch_one:
+                return {'total': 0, 'media': None}
+            return []
+
+        async def run_sync(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(self.main, 'execute_query', side_effect=fake_execute_query) as execute_query,
+            patch.object(self.main.asyncio, 'to_thread', side_effect=run_sync),
+        ):
+            await self.main.get_dashboard_pape(data_inicio='2026-01-01', data_fim='2026-12-31')
+
+        queries = [call.args[0] for call in execute_query.call_args_list]
+        self.assertEqual(len(queries), 14)
+        for query in queries:
+            self.assertIn("status = 'ativo'", query)
+
     async def test_get_dashboard_pape_uses_latest_project_answers(self):
         expected_results = [
             {'total': 12},
